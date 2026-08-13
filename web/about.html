@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sobre</title>
+  <style>
+    :root {
+      --bg: #111827; --panel: #1f2937; --text: #e5e7eb;
+      --panel-border: #374151; --input-border: #475569;
+      --btn-bg: #1f2937; --btn-border: #475569;
+    }
+    body[data-theme="light"] {
+      --bg: #c0c0c0; --panel: #d4d0c8; --text: #111827;
+      --panel-border: #ffffff; --input-border: #bfc5ce;
+      --btn-bg: #d4d0c8; --btn-border: #ffffff;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Courier New", monospace;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .about {
+      background: var(--panel);
+      border: 2px inset var(--panel-border);
+      padding: 30px;
+      max-width: 500px;
+      width: 100%;
+      border-radius: 8px;
+      text-align: center;
+    }
+    h1 { font-size: 28px; margin-bottom: 10px; }
+    .version { font-size: 14px; color: var(--text-weak); margin-bottom: 20px; }
+    p { line-height: 1.6; margin: 10px 0; }
+    .buttons { margin-top: 25px; }
+    .buttons button {
+      padding: 8px 30px;
+      background: var(--btn-bg);
+      border: 2px outset var(--btn-border);
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+    }
+    .buttons button:active { border-style: inset; }
+  </style>
+</head>
+<body>
+<div class="about">
+  <h1>p2p_12</h1>
+  <div class="version">Versão 2.0</div>
+  <p>Comunicação ponto a ponto criptografada com suporte a TCP (LAN) e Tor (Internet).</p>
+  <p>Identidade persistente local. Nenhum dado é enviado para servidores externos.</p>
+  <p style="font-size:13px;color:var(--text-weak);">Desenvolvido com Python + PySide6 + Tor.</p>
+  <div class="buttons">
+    <button id="closeBtn">Fechar</button>
+  </div>
+</div>
+<script>
+  document.getElementById('closeBtn').onclick = () => window.close();
+</script>
+</body>
+</html>

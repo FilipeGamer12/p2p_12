@@ -21,6 +21,7 @@ import threading
 import urllib.parse
 import urllib.request
 import uuid
+import webbrowser
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,9 +33,9 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 try:
-    from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton
+    from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QFileDialog
     from PySide6.QtWebEngineWidgets import QWebEngineView
-    from PySide6.QtCore import QUrl, Qt
+    from PySide6.QtCore import QUrl, Qt, QTimer, QObject, Signal, Slot
     from PySide6.QtGui import QMouseEvent
     PYSIDE_OK=True
 except Exception:
@@ -1622,6 +1623,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path == "/":
                 return self._send(200, self.app.html, "text/html; charset=utf-8")
+            if parsed.path == "/settings":
+                return self._send_html("settings.html")
+            if parsed.path == "/debug":
+                return self._send_html("debug.html")
+            if parsed.path == "/about":
+                return self._send_html("about.html")
             if parsed.path == "/api/info":
                 return self._send(200, json.dumps(self.app.info(), ensure_ascii=False))
             if parsed.path == "/api/poll":
@@ -1651,6 +1658,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         except Exception as exc:
             return self._send(500, json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+
+    def _send_html(self, filename):
+        try:
+            html_path = Path(__file__).resolve().parent / 'web' / filename
+            content = html_path.read_text(encoding='utf-8')
+            return self._send(200, content, 'text/html; charset=utf-8')
+        except Exception as e:
+            return self._send(500, f'<h1>Erro ao carregar página</h1><p>{e}</p>', 'text/html; charset=utf-8')
 
     def _send_file(self, path: Path, name: str):
         mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
@@ -1713,6 +1728,25 @@ class ApiHandler(BaseHTTPRequestHandler):
                 new_settings = self._json()
                 self.app.set_settings(new_settings)
                 return self._send(200, json.dumps(self.app.get_settings(), ensure_ascii=False))
+
+            if self.path == "/api/open_settings":
+                self.app.open_settings_window()
+                return self._send(200, '{"ok":true}')
+            if self.path == "/api/open_debug":
+                self.app.open_debug_window()
+                return self._send(200, '{"ok":true}')
+            if self.path == "/api/open_about":
+                self.app.open_about_window()
+                return self._send(200, '{"ok":true}')
+            if self.path == "/api/select_directory":
+                # Aguarda a seleção feita na thread principal
+                result = self.app.select_directory()
+                return self._send(200, json.dumps(result, ensure_ascii=False))
+            if self.path == "/api/open_file":
+                data = self._json()
+                filename = data.get('filename', '')
+                result = self.app.open_file(filename)
+                return self._send(200, json.dumps(result, ensure_ascii=False))
 
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         except Exception as exc:
@@ -1796,6 +1830,16 @@ class ApiServer:
 
 
 if PYSIDE_OK:
+    class GuiDispatcher(QObject):
+        # Signals are emitted by the HTTP worker threads and delivered to the
+        # Qt GUI thread because this QObject is created there.
+        open_window_requested = Signal(str, str, int, int)
+        gui_task_requested = Signal(object)
+
+        def __init__(self):
+            super().__init__()
+
+
     class RetroWindow(QWidget):
         def __init__(self, url):
             super().__init__()
@@ -1812,9 +1856,6 @@ if PYSIDE_OK:
             self.view = QWebEngineView(self)
             root.addWidget(self.view, 1)
             self.view.setUrl(QUrl(url))
-
-            # Usa o frame nativo do sistema operacional, preservando o layout visual
-            # já definido na interface web em vez de um title bar customizado.
 
 
 
@@ -1840,6 +1881,8 @@ def load_settings(base_dir: Path) -> dict:
     """Carrega as configurações do usuário ou retorna padrões."""
     settings_file = base_dir / 'settings.json'
     defaults = {
+        'username': '',
+        'download_dir': '',
         'transports': {
             'tcp': True,
             'tor': True,
@@ -1860,6 +1903,10 @@ def load_settings(base_dir: Path) -> dict:
         with settings_file.open('r', encoding='utf-8') as f:
             data = json.load(f)
         # Garantir que todas as chaves necessárias existem
+        if 'username' not in data:
+            data['username'] = defaults['username']
+        if 'download_dir' not in data:
+            data['download_dir'] = defaults['download_dir']
         if 'transports' not in data:
             data['transports'] = defaults['transports']
         if 'theme' not in data:
@@ -1894,8 +1941,20 @@ def save_settings(base_dir: Path, settings: dict) -> None:
 
 class App:
     def __init__(self, profile=None):
-        self.base=data_dir(profile); self.base.mkdir(parents=True,exist_ok=True); self.download_dir=self.base/'Downloads'; self.download_dir.mkdir(exist_ok=True); self.temp_dir=self.base/'tmp'; self.temp_dir.mkdir(exist_ok=True)
+        self.base=data_dir(profile); self.base.mkdir(parents=True,exist_ok=True)
         self.settings = load_settings(self.base)
+        # Carregar username e download_dir das configurações
+        self.username = self.settings.get('username', '')
+        download_dir_setting = self.settings.get('download_dir', '')
+        if download_dir_setting:
+            self.download_dir = Path(download_dir_setting)
+            self.download_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self.download_dir = self.base / 'Downloads'
+            self.download_dir.mkdir(exist_ok=True)
+        self.temp_dir = self.base / 'tmp'
+        self.temp_dir.mkdir(exist_ok=True)
+
         self.identity = Identity.load_or_create(self.base / 'identity.key')
         self.log_buffer = BackendLog()
         self.log_buffer.add('APP', 'Backend iniciado.')
@@ -1921,6 +1980,18 @@ class App:
         self.http = ApiServer(self)
         self.web_port = self.http.start()
         self.html = HTML
+
+        # Lista para rastrear janelas abertas
+        self.windows = []
+        self._qt_app = QApplication.instance()
+        # App is constructed on the Qt main thread. The dispatcher therefore
+        # provides a safe queued path for API requests arriving on HTTP worker
+        # threads to create/manipulate Qt widgets.
+        self.gui_dispatcher = GuiDispatcher() if PYSIDE_OK else None
+        if self.gui_dispatcher is not None:
+            self.gui_dispatcher.open_window_requested.connect(self._create_window)
+            self.gui_dispatcher.gui_task_requested.connect(self._run_gui_task)
+
     def get_debug_logs(self, limit: int = 1000):
         return self.log_buffer.snapshot(limit)
 
@@ -2008,10 +2079,27 @@ class App:
         return out
     def get_settings(self):
         """Retorna as configurações atuais do usuário."""
-        return dict(self.settings)
+        return {
+            'username': self.username,
+            'download_dir': str(self.download_dir),
+            'transports': self.settings.get('transports', {}),
+            'tcp': self.settings.get('tcp', {'mode': 'standard'}),
+            'theme': self.settings.get('theme', 'dark'),
+        }
     def set_settings(self, new_settings: dict) -> None:
         """Atualiza e salva as configurações do usuário."""
         # Validar e mesclar com as configurações atuais
+        if 'username' in new_settings:
+            self.username = new_settings['username']
+            self.settings['username'] = self.username
+        if 'download_dir' in new_settings:
+            new_path = new_settings['download_dir'].strip()
+            if new_path:
+                p = Path(new_path)
+                p.mkdir(parents=True, exist_ok=True)
+                self.download_dir = p
+                self.settings['download_dir'] = str(p)
+                self.service.download_dir = p
         if 'transports' in new_settings:
             tor_was_enabled = self.settings['transports'].get('tor', False)
             self.settings['transports'].update(new_settings['transports'])
@@ -2025,11 +2113,121 @@ class App:
         if 'theme' in new_settings:
             self.settings['theme'] = new_settings['theme']
         save_settings(self.base, self.settings)
+
+    # --- Métodos para abrir janelas separadas ---
+    # These methods may be called by ApiHandler, which runs in a
+    # ThreadingHTTPServer worker thread. Qt widgets MUST only be accessed from
+    # the GUI thread, so requests are queued through GuiDispatcher.
+    def open_settings_window(self):
+        self._open_window('/settings', 'Configurações', 650, 600)
+
+    def open_debug_window(self):
+        self._open_window('/debug', 'Debug - Logs', 900, 600)
+
+    def open_about_window(self):
+        self._open_window('/about', 'Sobre', 500, 400)
+
+    def _open_window(self, path, title, width, height):
+        if not PYSIDE_OK or self.gui_dispatcher is None:
+            return
+        self.gui_dispatcher.open_window_requested.emit(path, title, width, height)
+
+    @Slot(str, str, int, int)
+    def _create_window(self, path, title, width, height):
+        try:
+            from PySide6.QtWidgets import QWidget, QVBoxLayout
+            from PySide6.QtWebEngineWidgets import QWebEngineView
+            from PySide6.QtCore import QUrl
+            win = QWidget()
+            win.setWindowTitle(title)
+            win.resize(width, height)
+            layout = QVBoxLayout(win)
+            layout.setContentsMargins(0, 0, 0, 0)
+            view = QWebEngineView()
+            view.setUrl(QUrl(f'http://127.0.0.1:{self.web_port}{path}'))
+            layout.addWidget(view)
+            win.show()
+            # Remove da lista quando fechada
+            win.destroyed.connect(lambda: self.windows.remove(win) if win in self.windows else None)
+            self.windows.append(win)
+        except Exception as e:
+            self.log_buffer.add('APP', f'Erro ao criar janela {title}: {e}')
+
+    @Slot(object)
+    def _run_gui_task(self, task):
+        """Run a blocking native-GUI task on the Qt main thread."""
+        try:
+            task['callable']()
+        except Exception as exc:
+            task['result']['error'] = str(exc)
+            task['event'].set()
+
+    def select_directory(self):
+        """Seleciona diretório via diálogo nativo no thread principal."""
+        if not PYSIDE_OK or self.gui_dispatcher is None:
+            return {'error': 'GUI não disponível'}
+
+        result_event = threading.Event()
+        result = {'path': ''}
+
+        def gui_task():
+            try:
+                app = QApplication.instance()
+                parent = app.activeWindow() if app else None
+                result['path'] = QFileDialog.getExistingDirectory(
+                    parent, 'Selecionar pasta de downloads'
+                ) or ''
+            except Exception as exc:
+                result['error'] = str(exc)
+            finally:
+                result_event.set()
+
+        # Signal delivery is queued to the GUI thread. Do not use
+        # QTimer.singleShot from this HTTP worker: that worker has no Qt event
+        # loop, so the callback may never run.
+        self.gui_dispatcher.gui_task_requested.emit({'callable': gui_task, 'event': result_event, 'result': result})
+        if not result_event.wait(120):
+            return {'error': 'Tempo limite excedido para seleção de diretório.'}
+        return result
+
+    def open_file(self, filename):
+        # filename é apenas o nome do arquivo, procuramos no download_dir
+        file_path = self.download_dir / filename
+        if not file_path.is_file():
+            return {'error': 'Arquivo não encontrado'}
+        # Verifica extensões perigosas
+        dangerous_ext = ('.exe', '.bat', '.cmd', '.com', '.scr', '.vbs', '.ps1')
+        if file_path.suffix.lower() in dangerous_ext:
+            # Abre a pasta e seleciona o arquivo
+            if platform.system() == 'Windows':
+                subprocess.Popen(['explorer', '/select,', str(file_path)])
+            else:
+                # No Linux/Mac, abre o diretório
+                webbrowser.open(str(file_path.parent))
+            return {'opened': False, 'message': 'Arquivo executável – mostrando na pasta'}
+        else:
+            # Tenta abrir com o aplicativo padrão
+            try:
+                if platform.system() == 'Windows':
+                    os.startfile(str(file_path))
+                else:
+                    webbrowser.open(str(file_path))
+                return {'opened': True}
+            except Exception as e:
+                return {'error': f'Erro ao abrir: {e}'}
+
     def shutdown(self):
         self.http.stop()
         self.service.stop()
         self.tor.stop()
         self.bluetooth.stop()
+        # Fechar janelas abertas
+        for win in self.windows:
+            try:
+                win.close()
+            except Exception:
+                pass
+        self.windows.clear()
 
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--profile'); args=ap.parse_args()

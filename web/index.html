@@ -11,8 +11,7 @@
 body[data-theme="light"]{
   --bg:#c0c0c0; --bg-strong:#d4d0c8; --panel:#d4d0c8; --panel-alt:#c0c0c0; --toolbar-bg:#c0c0c0; --toolbar-border:#808080; --text:#111827; --text-weak:#1f2937; --muted:#4b5563; --btn-bg:#d4d0c8; --btn-border:#ffffff; --input-bg:#ffffff; --input-border:#bfc5ce; --panel-border:#ffffff; --chat-bg:#ffffff; --status-bg:#000; --status-fg:#0f0; --attachment-bg:#f3f4f6; --attachment-border:#9ca3af; --drop-border:#777; --drop-hover:#e5e7eb; --accent:#000080; --accent-strong:#1084d7; --link:#0055aa; --shadow:rgba(0,0,0,.08)
 }
-*{box-sizing:border-box}html,body{height:100%}body{margin:0;background:var(--bg);font-family:"Courier New",monospace;color:var(--text);font-size:14px}.window{width:100%;height:100%;margin:auto;background:var(--bg);display:flex;flex-direction:column}.title{height:32px;cursor:move;user-select:none;-webkit-user-select:none;background:linear-gradient(90deg,#000080,#1084d7);color:#fff;font-weight:bold;padding:7px 10px;display:flex;justify-content:space-between}.toolbar{display:flex;gap:4px;padding:5px;border-bottom:2px solid var(--toolbar-border);background:var(--toolbar-bg);flex-wrap:wrap}.btn{border:2px outset var(--btn-border);background:var(--btn-bg);color:var(--text);padding:5px 10px;font:inherit;cursor:pointer}.btn:active{border-style:inset}.main{display:grid;grid-template-columns:310px 1fr;gap:8px;padding:8px;min-height:0;flex:1;height:100%}.side{display:flex;flex-direction:column;min-height:0;height:100%}.panel{background:var(--panel);border:2px inset var(--panel-border);padding:8px;min-height:0;overflow:auto;resize:both;min-width:220px;min-height:120px}.label{font-weight:bold;margin:5px 0;color:var(--text);}.status{background:var(--status-bg);color:var(--status-fg);padding:6px;min-height:29px}.transports{font-size:11px;color:var(--muted);margin-top:4px}.mono{font-family:inherit}textarea,input{width:100%;font:inherit;border:2px inset var(--input-border);background:var(--input-bg);color:var(--text);padding:5px}.identity{height:145px;resize:none}.contact{height:125px;resize:none}.small{font-size:11px;color:var(--muted)}.chat{height:100%;background:var(--chat-bg);border:2px inset var(--panel-border);padding:8px;overflow:auto;resize:both;min-height:180px;flex:1}.msg{margin:0 0 9px;white-space:pre-wrap;word-break:break-word}.msg.me{color:var(--accent)}.msg.peer{color:#2ecc71}.msg.sys{color:var(--muted)}.attachment{padding:6px;margin:6px 0;border:1px dashed var(--attachment-border);background:var(--attachment-bg)}.attachment a{color:var(--link)}.send{display:flex;gap:5px;margin-top:6px}.send textarea{height:62px;resize:none}.send .btn{width:94px}.footer{font-size:10px;padding:5px 8px;border-top:2px solid var(--toolbar-border);color:var(--muted)}.hidden{display:none}.progress{height:12px;background:var(--input-bg);border:1px inset var(--input-border)}.progress>div{height:100%;background:var(--accent-strong);width:0}.drop{border:2px dashed var(--drop-border);padding:8px;text-align:center;margin-top:5px;color:var(--text-weak)}.drop.drag{background:var(--drop-hover)}
-.modal{display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background-color:rgba(0,0,0,0.5)}.modal.show{display:flex;align-items:center;justify-content:center}.modal-content{background:var(--panel);border:2px inset var(--panel-border);padding:15px;min-width:300px;max-width:500px;max-height:80vh;overflow:auto}.modal-title{font-weight:bold;margin-bottom:10px;font-size:16px}.modal-close{float:right;font-size:20px;font-weight:bold;cursor:pointer;color:var(--text)}.modal-close:hover{color:var(--accent)}.settings-group{margin:10px 0}.settings-group label{display:block;margin:5px 0;cursor:pointer}.settings-group input[type="checkbox"]{margin-right:5px;cursor:pointer}.modal-buttons{display:flex;gap:5px;margin-top:15px;justify-content:flex-end}.modal-buttons .btn{flex:1}
+*{box-sizing:border-box}html,body{height:100%}body{margin:0;background:var(--bg);font-family:"Courier New",monospace;color:var(--text);font-size:14px}.window{width:100%;height:100%;margin:auto;background:var(--bg);display:flex;flex-direction:column}.title{height:32px;cursor:move;user-select:none;-webkit-user-select:none;background:linear-gradient(90deg,#000080,#1084d7);color:#fff;font-weight:bold;padding:7px 10px;display:flex;justify-content:space-between}.toolbar{display:flex;gap:4px;padding:5px;border-bottom:2px solid var(--toolbar-border);background:var(--toolbar-bg);flex-wrap:wrap}.btn{border:2px outset var(--btn-border);background:var(--btn-bg);color:var(--text);padding:5px 10px;font:inherit;cursor:pointer}.btn:active{border-style:inset}.main{display:grid;grid-template-columns:310px 1fr;gap:8px;padding:8px;min-height:0;flex:1;height:100%}.side{display:flex;flex-direction:column;min-height:0;height:100%}.panel{background:var(--panel);border:2px inset var(--panel-border);padding:8px;min-height:0;overflow:auto;resize:both;min-width:220px;min-height:120px}.label{font-weight:bold;margin:5px 0;color:var(--text);}.status{background:var(--status-bg);color:var(--status-fg);padding:6px;min-height:29px}.transports{font-size:11px;color:var(--muted);margin-top:4px}.mono{font-family:inherit}textarea,input{width:100%;font:inherit;border:2px inset var(--input-border);background:var(--input-bg);color:var(--text);padding:5px}.identity{height:145px;resize:none}.contact{height:125px;resize:none}.small{font-size:11px;color:var(--muted)}.chat{height:100%;background:var(--chat-bg);border:2px inset var(--panel-border);padding:8px;overflow:auto;resize:both;min-height:180px;flex:1}.msg{margin:0 0 9px;white-space:pre-wrap;word-break:break-word}.msg.me{color:var(--accent)}.msg.peer{color:#2ecc71}.msg.sys{color:var(--muted)}.attachment{padding:6px;margin:6px 0;border:1px dashed var(--attachment-border);background:var(--attachment-bg)}.attachment a{color:var(--link);cursor:pointer;text-decoration:underline}.attachment a:hover{color:var(--accent)}.send{display:flex;gap:5px;margin-top:6px}.send textarea{height:62px;resize:none}.send .btn{width:94px}.footer{font-size:10px;padding:5px 8px;border-top:2px solid var(--toolbar-border);color:var(--muted)}.hidden{display:none}.progress{height:12px;background:var(--input-bg);border:1px inset var(--input-border)}.progress>div{height:100%;background:var(--accent-strong);width:0}.drop{border:2px dashed var(--drop-border);padding:8px;text-align:center;margin-top:5px;color:var(--text-weak)}.drop.drag{background:var(--drop-hover)}
 @media(max-width:760px){body{min-width:0}.window{width:100vw;min-height:100vh}.toolbar{overflow-x:auto;white-space:nowrap;padding:6px}.toolbar .btn{min-height:42px;font-size:14px}.main{grid-template-columns:1fr;min-height:calc(100vh - 58px)}.side{display:block;max-height:42vh;overflow:auto}.side .panel{margin-top:6px!important}.chat{min-height:38vh;max-height:none}.send{position:sticky;bottom:0;background:#c0c0c0;padding-top:6px}.send textarea{height:70px;font-size:16px}.send .btn{width:100px;min-height:70px}.drop{min-height:54px;display:flex;align-items:center;justify-content:center}.contact,.identity{font-size:14px}.btn{min-height:40px}}
 @media(min-width:761px){.window{width:100%;height:100%}}
   </style>
@@ -63,59 +62,12 @@ body[data-theme="light"]{
   </div>
 </div>
 
-<!-- Modal de Configurações -->
-<div id="settingsModal" class="modal">
-  <div class="modal-content">
-    <div>
-      <span class="modal-close" id="settingsClose">&times;</span>
-      <div class="modal-title">CONFIGURAÇÕES</div>
-    </div>
-    <div>
-      <div style="font-weight:bold;margin:10px 0;">Transportes</div>
-      <div class="settings-group">
-        <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
-          <label style="margin:0"><input type="checkbox" id="tcpCheck"> TCP (rede local)</label>
-          <button class="btn" type="button" id="radminBtn">LAN avançada (RadminVPN): OFF</button>
-        </div>
-        <div class="small" id="tcpModeInfo">Só funciona quando os dois estão na mesma rede local (Wi-Fi/cabo).</div>
-      </div>
-      <div class="settings-group">
-        <label><input type="checkbox" id="torCheck"> Tor (internet)</label>
-        <div class="small">Use este para conectar com alguém em outra rede/internet. Não precisa configurar roteador.</div>
-      </div>
-      <div class="settings-group">
-        <label><input type="checkbox" id="btCheck"> Bluetooth</label>
-        <div class="small">Conexão Bluetooth (manual)</div>
-      </div>
-    </div>
-    <div class="modal-buttons">
-      <button class="btn" id="settingsSave">Salvar</button>
-      <button class="btn" id="settingsCancel">Cancelar</button>
-    </div>
-  </div>
-</div>
-
-<div id="debugModal" class="modal">
-  <div class="modal-content" style="width:min(1000px,94vw);max-width:none;height:80vh;display:flex;flex-direction:column">
-    <div>
-      <span class="modal-close" id="debugClose">&times;</span>
-      <div class="modal-title">DEBUG — BACKEND</div>
-    </div>
-    <div id="debugLog" style="flex:1;overflow:auto;background:#05070b;color:#d1d5db;border:2px inset var(--panel-border);padding:8px;font:12px/1.35 'Courier New',monospace;white-space:pre-wrap"></div>
-    <div class="modal-buttons">
-      <button class="btn" id="debugRefresh">Atualizar</button>
-      <button class="btn" id="debugCloseBtn">Fechar</button>
-    </div>
-  </div>
-</div>
-
 <script>
 const $=id=>document.getElementById(id);
 let info=null;
 let knownFiles=new Set();
 let connecting=false;
 let tcpMode="standard";
-let debugTimer=null;
 
 function applyTheme(theme){
   const normalized = theme === 'light' ? 'light' : 'dark';
@@ -178,9 +130,6 @@ async function updateTransportStatus(){
     let status = [];
     if(tor.enabled) status.push('TOR (internet): ' + (tor.state || 'OFF'));
     $('transports').textContent = status.length ? status.join(' | ') : '';
-    // O endereço onion só existe depois que o Tor termina de inicializar;
-    // assim que ele ficar ONLINE, atualizamos "meu contato" automaticamente
-    // (sem isso, o usuário precisava reiniciar o app pra ver o onion no contato).
     if (tor.state !== lastTorState) {
       lastTorState = tor.state;
       if (tor.state === 'ONLINE') {
@@ -193,82 +142,31 @@ async function updateTransportStatus(){
 async function loadSettings(){
   try {
     let settings = await api('/api/settings');
-    $('tcpCheck').checked = settings.transports.tcp;
-    $('torCheck').checked = settings.transports.tor;
-    $('btCheck').checked = settings.transports.bluetooth;
     tcpMode = (settings.tcp && settings.tcp.mode) || 'standard';
-    updateRadminButton();
   } catch(e) {}
 }
 
-async function saveSettings(){
-  try {
-    let settings = {
-      transports: {
-        tcp: $('tcpCheck').checked,
-        tor: $('torCheck').checked,
-        bluetooth: $('btCheck').checked
-      },
-      tcp: { mode: tcpMode }
-    };
-    await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(settings)});
-    closeModal('settingsModal');
-    await refreshInfo();
-    $('status').textContent='Configurações salvas.';
-  } catch(e) {
-    $('status').textContent='Erro: '+e.message;
+function updateConnectBtn(){
+  if(connecting) {
+    $('cancelBtn').classList.remove('hidden');
+    $('connectBtn').disabled=true;
+  } else {
+    $('cancelBtn').classList.add('hidden');
+    $('connectBtn').disabled=false;
   }
 }
 
-function updateRadminButton(){
-  $('radminBtn').textContent = tcpMode === 'radminvpn' ? 'LAN avançada (RadminVPN): ON' : 'LAN avançada (RadminVPN): OFF';
-  $('tcpModeInfo').textContent = tcpMode === 'radminvpn' ? 'TCP anuncia e usa o endereço da rede virtual RadminVPN (26.x.x.x) — como se todos estivessem na mesma LAN. Ative dos DOIS lados.' : 'Só funciona quando os dois estão na mesma rede local (Wi-Fi/cabo).';
-}
-
-$('radminBtn').onclick=async()=>{
-  tcpMode = tcpMode === 'radminvpn' ? 'standard' : 'radminvpn';
-  updateRadminButton();
+// Botões que abrem janelas separadas (usam API)
+async function openSeparateWindow(endpoint){
   try {
-    let r = await api('/api/radminvpn/status');
-    if(tcpMode === 'radminvpn' && !r.ip){
-      tcpMode = 'standard';
-      updateRadminButton();
-      $('status').textContent='RadminVPN não detectado neste computador.';
-      return;
-    }
-    $('tcpModeInfo').textContent = tcpMode === 'radminvpn' ? ('RadminVPN detectado: '+r.ip+'. Lembre-se de ativar este modo dos dois lados.') : 'Só funciona quando os dois estão na mesma rede local (Wi-Fi/cabo).';
+    await api(endpoint, {method:'POST'});
   } catch(e) {
-    $('status').textContent='Erro ao verificar RadminVPN: '+e.message;
-  }
-};
-
-async function refreshDebug(){
-  try {
-    const data=await api('/api/debug/logs');
-    $('debugLog').textContent=data.logs.map(x=>`[${x.time}] [${x.source}] ${x.message}`).join('\n');
-    $('debugLog').scrollTop=$('debugLog').scrollHeight;
-  } catch(e) {
-    $('debugLog').textContent='Erro ao carregar logs: '+e.message;
+    $('status').textContent = 'Não foi possível abrir a janela: ' + e.message;
   }
 }
-
-$('debugBtn').onclick=()=>{ showModal('debugModal'); refreshDebug(); clearInterval(debugTimer); debugTimer=setInterval(refreshDebug,1000); };
-$('debugClose').onclick=()=>{ clearInterval(debugTimer); debugTimer=null; closeModal('debugModal'); };
-$('debugCloseBtn').onclick=()=>{ clearInterval(debugTimer); debugTimer=null; closeModal('debugModal'); };
-$('debugRefresh').onclick=refreshDebug;
-
-function showModal(modalId){
-  $(modalId).classList.add('show');
-}
-
-function closeModal(modalId){
-  $(modalId).classList.remove('show');
-}
-
-$('configBtn').onclick=()=>showModal('settingsModal');
-$('settingsClose').onclick=()=>closeModal('settingsModal');
-$('settingsCancel').onclick=()=>closeModal('settingsModal');
-$('settingsSave').onclick=saveSettings;
+$('configBtn').onclick = () => openSeparateWindow('/api/open_settings');
+$('debugBtn').onclick = () => openSeparateWindow('/api/open_debug');
+$('aboutBtn').onclick = () => openSeparateWindow('/api/open_about');
 
 $('addBtn').onclick=async()=>{
   let c=prompt('Cole o contato público do parceiro:');
@@ -315,16 +213,6 @@ $('cancelBtn').onclick=async()=>{
   }
 }
 
-function updateConnectBtn(){
-  if(connecting) {
-    $('cancelBtn').classList.remove('hidden');
-    $('connectBtn').disabled=true;
-  } else {
-    $('cancelBtn').classList.add('hidden');
-    $('connectBtn').disabled=false;
-  }
-}
-
 $('sendBtn').onclick=send;
 $('message').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}};
 
@@ -363,23 +251,24 @@ async function upload(files){
   }
 }
 
-$('copyBtn').onclick=async()=>{
-  try{
-    if(navigator.clipboard&&navigator.clipboard.writeText){
-      await navigator.clipboard.writeText(info.contact)
-    } else {
-      let t=document.createElement('textarea');
-      t.value=info.contact;
-      document.body.appendChild(t);
-      t.select();
-      document.execCommand('copy');
-      t.remove()
+$('copyBtn').onclick = async () => {
+    try {
+        await refreshInfo(); // garante que info.contact está atualizado
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(info.contact);
+        } else {
+            let t = document.createElement('textarea');
+            t.value = info.contact;
+            document.body.appendChild(t);
+            t.select();
+            document.execCommand('copy');
+            t.remove();
+        }
+        $('status').textContent = 'Contato copiado!';
+    } catch(e) {
+        $('status').textContent = 'Erro ao copiar: ' + e.message;
     }
-    $('status').textContent='Contato copiado.'
-  } catch(e){
-    $('status').textContent='Nao foi possivel copiar automaticamente.'
-  }
-}
+};
 
 $('btBtn').onclick=async()=>{
   try{
@@ -389,8 +278,6 @@ $('btBtn').onclick=async()=>{
     $('status').textContent=e.message
   }
 }
-
-$('aboutBtn').onclick=()=>alert('p2p_12 2.0\nP2P criptografado com Tor.\nA identidade é local e persistente.');
 
 async function poll(){
   try{
@@ -413,8 +300,30 @@ async function poll(){
       }
       else if(e[0]==='message')add('peer',e[2]);
       else if(e[0]==='file_received'){
-        let url='/download/'+encodeURIComponent(e[1]);
-        add('peer','',`PARCEIRO: <div class="attachment">📎 <a href="${url}" target="_blank">${esc(e[1])}</a> — ${Math.round(e[3]/1024)} KB</div>`)
+        let filename = e[1];
+        // Cria um link que, ao clicar, chama a API para abrir o arquivo
+        let link = document.createElement('a');
+        link.href = '#';
+        link.textContent = filename;
+        link.style.cursor = 'pointer';
+        link.style.textDecoration = 'underline';
+        link.onclick = (ev) => {
+            ev.preventDefault();
+            fetch('/api/open_file', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename: filename })
+            }).then(r => r.json()).then(data => {
+                if (data.error) alert('Erro: ' + data.error);
+                else if (data.message) alert(data.message);
+            }).catch(alert);
+        };
+        let container = document.createElement('div');
+        container.className = 'attachment';
+        container.innerHTML = '📎 ';
+        container.appendChild(link);
+        container.innerHTML += ` — ${Math.round(e[3]/1024)} KB`;
+        add('peer','', container.outerHTML);
       }
       else if(e[0]==='file_progress'){
         $('status').textContent=`Arquivo ${e[4]}: ${e[2]}/${e[3]}`

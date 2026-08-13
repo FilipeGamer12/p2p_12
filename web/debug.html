@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Debug</title>
+  <style>
+    :root {
+      --bg: #111827; --panel: #1f2937; --text: #e5e7eb;
+      --panel-border: #374151; --input-border: #475569;
+      --btn-bg: #1f2937; --btn-border: #475569;
+    }
+    body[data-theme="light"] {
+      --bg: #c0c0c0; --panel: #d4d0c8; --text: #111827;
+      --panel-border: #ffffff; --input-border: #bfc5ce;
+      --btn-bg: #d4d0c8; --btn-border: #ffffff;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Courier New", monospace;
+      background: var(--bg);
+      color: var(--text);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    .debug-container {
+      background: var(--panel);
+      border: 2px inset var(--panel-border);
+      padding: 20px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      border-radius: 8px;
+      max-width: 1200px;
+      margin: 0 auto;
+      width: 100%;
+      min-height: 400px;
+    }
+    h1 {
+      font-size: 22px;
+      margin-bottom: 15px;
+      border-bottom: 2px solid var(--input-border);
+      padding-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .log-area {
+      flex: 1;
+      background: #05070b;
+      color: #d1d5db;
+      border: 2px inset var(--input-border);
+      padding: 10px;
+      font: 12px/1.35 'Courier New', monospace;
+      overflow: auto;
+      white-space: pre-wrap;
+      min-height: 200px;
+    }
+    .buttons {
+      display: flex;
+      gap: 10px;
+      margin-top: 15px;
+      justify-content: flex-end;
+    }
+    .buttons button {
+      padding: 8px 18px;
+      background: var(--btn-bg);
+      border: 2px outset var(--btn-border);
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+    }
+    .buttons button:active { border-style: inset; }
+  </style>
+</head>
+<body>
+<div class="debug-container">
+  <h1>Debug Logs</h1>
+  <div class="log-area" id="log"></div>
+  <div class="buttons">
+    <button id="refreshBtn">Atualizar</button>
+    <button id="closeBtn">Fechar</button>
+  </div>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let timer = null;
+
+  async function refreshLog() {
+    try {
+      const res = await fetch('/api/debug/logs');
+      const data = await res.json();
+      $('log').textContent = data.logs.map(x => `[${x.time}] [${x.source}] ${x.message}`).join('\n');
+      $('log').scrollTop = $('log').scrollHeight;
+    } catch (e) {
+      $('log').textContent = 'Erro ao carregar logs: ' + e.message;
+    }
+  }
+
+  $('refreshBtn').onclick = refreshLog;
+  $('closeBtn').onclick = () => window.close();
+
+  // Atualiza a cada 2 segundos
+  refreshLog();
+  timer = setInterval(refreshLog, 2000);
+  window.addEventListener('beforeunload', () => clearInterval(timer));
+</script>
+</body>
+</html>

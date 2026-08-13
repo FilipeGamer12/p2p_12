@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Configurações</title>
+  <style>
+    :root {
+      --bg: #111827; --bg-strong: #0b1220; --panel: #1f2937;
+      --text: #e5e7eb; --text-weak: #cbd5e1; --muted: #9ca3af;
+      --btn-bg: #1f2937; --btn-border: #475569; --input-bg: #0f172a;
+      --input-border: #475569; --panel-border: #374151; --accent: #60a5fa;
+    }
+    body[data-theme="light"] {
+      --bg: #c0c0c0; --panel: #d4d0c8; --text: #111827;
+      --text-weak: #1f2937; --muted: #4b5563; --btn-bg: #d4d0c8;
+      --btn-border: #ffffff; --input-bg: #ffffff; --input-border: #bfc5ce;
+      --panel-border: #ffffff; --accent: #000080;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Courier New", monospace;
+      background: var(--bg);
+      color: var(--text);
+      padding: 20px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+    .settings-container {
+      background: var(--panel);
+      border: 2px inset var(--panel-border);
+      padding: 25px;
+      max-width: 600px;
+      width: 100%;
+      border-radius: 8px;
+    }
+    h1 {
+      font-size: 22px;
+      margin-bottom: 20px;
+      border-bottom: 2px solid var(--input-border);
+      padding-bottom: 10px;
+    }
+    .field {
+      margin-bottom: 18px;
+    }
+    .field label {
+      display: block;
+      font-weight: bold;
+      margin-bottom: 5px;
+      color: var(--text-weak);
+    }
+    .field input[type="text"],
+    .field input[type="password"] {
+      width: 100%;
+      padding: 8px;
+      background: var(--input-bg);
+      border: 2px inset var(--input-border);
+      color: var(--text);
+      font: inherit;
+    }
+    .field .dir-select {
+      display: flex;
+      gap: 8px;
+    }
+    .field .dir-select input {
+      flex: 1;
+    }
+    .field .dir-select button {
+      padding: 8px 14px;
+      background: var(--btn-bg);
+      border: 2px outset var(--btn-border);
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .field .dir-select button:active {
+      border-style: inset;
+    }
+    .checkbox-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 15px;
+      margin: 10px 0 20px;
+    }
+    .checkbox-group label {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      cursor: pointer;
+    }
+    .buttons {
+      display: flex;
+      gap: 10px;
+      margin-top: 20px;
+      justify-content: flex-end;
+    }
+    .buttons button {
+      padding: 8px 20px;
+      background: var(--btn-bg);
+      border: 2px outset var(--btn-border);
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+    }
+    .buttons button:active {
+      border-style: inset;
+    }
+    .buttons .save {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    .status {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 13px;
+      min-height: 20px;
+    }
+    .small {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+    @media (max-width: 500px) {
+      .field .dir-select {
+        flex-wrap: wrap;
+      }
+      .field .dir-select button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+<div class="settings-container">
+  <h1>Configurações</h1>
+
+  <div class="field">
+    <label for="username">Nome de usuário</label>
+    <input type="text" id="username" placeholder="Seu nome (opcional)">
+    <div class="small">Será exibido nas mensagens enviadas.</div>
+  </div>
+
+  <div class="field">
+    <label for="downloadDir">Pasta de downloads</label>
+    <div class="dir-select">
+      <input type="text" id="downloadDir" placeholder="Caminho para salvar os arquivos recebidos">
+      <button id="selectDirBtn">Selecionar...</button>
+    </div>
+    <div class="small">Arquivos recebidos serão salvos nesta pasta.</div>
+  </div>
+
+  <div class="field">
+    <label>Transportes</label>
+    <div class="checkbox-group">
+      <label><input type="checkbox" id="tcpCheck"> TCP (rede local)</label>
+      <label><input type="checkbox" id="torCheck"> Tor (internet)</label>
+      <label><input type="checkbox" id="btCheck"> Bluetooth</label>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <button id="radminBtn" style="padding:4px 12px;background:var(--btn-bg);border:2px outset var(--btn-border);color:var(--text);font:inherit;cursor:pointer;">LAN avançada (RadminVPN): OFF</button>
+      <span id="tcpModeInfo" class="small" style="margin:0;">Só funciona quando os dois estão na mesma rede local.</span>
+    </div>
+  </div>
+
+  <div class="buttons">
+    <button id="cancelBtn">Cancelar</button>
+    <button id="saveBtn" class="save">Salvar</button>
+  </div>
+  <div id="statusMsg" class="status"></div>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  let tcpMode = 'standard';
+
+  async function loadSettings() {
+    try {
+      const res = await fetch('/api/settings');
+      const data = await res.json();
+      $('username').value = data.username || '';
+      $('downloadDir').value = data.download_dir || '';
+      $('tcpCheck').checked = data.transports.tcp;
+      $('torCheck').checked = data.transports.tor;
+      $('btCheck').checked = data.transports.bluetooth;
+      tcpMode = (data.tcp && data.tcp.mode) || 'standard';
+      updateRadminButton();
+    } catch (e) {
+      showStatus('Erro ao carregar configurações: ' + e.message);
+    }
+  }
+
+  function updateRadminButton() {
+    $('radminBtn').textContent = tcpMode === 'radminvpn' ? 'LAN avançada (RadminVPN): ON' : 'LAN avançada (RadminVPN): OFF';
+    $('tcpModeInfo').textContent = tcpMode === 'radminvpn'
+      ? 'TCP anuncia e usa o endereço da rede virtual RadminVPN (26.x.x.x) — como se todos estivessem na mesma LAN. Ative dos DOIS lados.'
+      : 'Só funciona quando os dois estão na mesma rede local (Wi-Fi/cabo).';
+  }
+
+  $('radminBtn').onclick = () => {
+    tcpMode = tcpMode === 'radminvpn' ? 'standard' : 'radminvpn';
+    updateRadminButton();
+  };
+
+  async function saveSettings() {
+    const payload = {
+      username: $('username').value.trim(),
+      download_dir: $('downloadDir').value.trim(),
+      transports: {
+        tcp: $('tcpCheck').checked,
+        tor: $('torCheck').checked,
+        bluetooth: $('btCheck').checked
+      },
+      tcp: { mode: tcpMode }
+    };
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showStatus('Configurações salvas com sucesso!');
+        setTimeout(() => window.close(), 800);
+      } else {
+        showStatus('Erro: ' + (data.error || 'desconhecido'));
+      }
+    } catch (e) {
+      showStatus('Erro ao salvar: ' + e.message);
+    }
+  }
+
+  function showStatus(msg) {
+    $('statusMsg').textContent = msg;
+  }
+
+  $('selectDirBtn').onclick = async () => {
+    try {
+      const res = await fetch('/api/select_directory', { method: 'POST' });
+      const data = await res.json();
+      if (data.path) {
+        $('downloadDir').value = data.path;
+      } else if (data.error) {
+        showStatus('Erro: ' + data.error);
+      }
+    } catch (e) {
+      showStatus('Erro ao selecionar diretório: ' + e.message);
+    }
+  };
+
+  $('saveBtn').onclick = saveSettings;
+  $('cancelBtn').onclick = () => window.close();
+
+  loadSettings();
+</script>
+</body>
+</html>
