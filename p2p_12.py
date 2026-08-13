@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import base64
 import hashlib
-import ipaddress
 import json
 import mimetypes
 import os
@@ -13,9 +12,14 @@ import queue
 import re
 import socket
 import struct
+import shutil
+import subprocess
+import tarfile
+import time
 import sys
 import threading
 import urllib.parse
+import urllib.request
 import uuid
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,7 +41,32 @@ except Exception:
     PYSIDE_OK=False
 
 APP_VERSION = 2
+APP_VERSION_NEW = 3  # Versão com suporte a múltiplos transportes
 PREFIX = "RETROCHAT2."
+PREFIX_NEW = "P2P12."  # Novo prefixo para contatos com múltiplos transportes
+
+
+class BackendLog:
+    def __init__(self, max_entries: int = 2000):
+        self.max_entries=max_entries; self._items=[]; self._lock=threading.Lock()
+    def add(self, source: str, message: object):
+        item={"time":time.strftime("%Y-%m-%d %H:%M:%S"),"source":str(source).upper(),"message":str(message).replace("\x00","")}
+        with self._lock:
+            self._items.append(item)
+            if len(self._items)>self.max_entries: del self._items[:len(self._items)-self.max_entries]
+    def snapshot(self, limit=1000):
+        with self._lock: return list(self._items[-max(1,min(int(limit),self.max_entries)):])
+
+class EventQueue(queue.Queue):
+    def __init__(self, log): super().__init__(); self.log=log
+    def put(self,item,*args,**kwargs):
+        try:
+            if isinstance(item,tuple) and item:
+                src='TOR' if item[0]=='tor_log' else 'APP'
+                msg=item[1] if item[0]=='tor_log' and len(item)>1 else ' | '.join(str(x) for x in item)
+                self.log.add(src,msg)
+        except Exception: pass
+        return super().put(item,*args,**kwargs)
 
 
 def b64e(data: bytes) -> str:
@@ -88,6 +117,38 @@ class Identity:
         }
         return PREFIX + b64e(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
 
+    def contact_blob_v3(self, tcp_host: str = "", tcp_port: int = 0, tor_onion: str = "", bt_id: str = "") -> str:
+        """Gera um contato no novo formato (v3) com suporte a múltiplos transportes."""
+        transports = {}
+        
+        if tcp_host:
+            transports["tcp"] = {
+                "host": str(tcp_host),
+                "port": int(tcp_port),
+                "enabled": True,
+            }
+        
+        if tor_onion:
+            transports["tor"] = {
+                "onion": str(tor_onion),
+                "port": int(tcp_port),  # Reutiliza a mesma porta
+                "enabled": True,
+            }
+        
+        if bt_id:
+            transports["bluetooth"] = {
+                "id": str(bt_id),
+                "enabled": True,
+            }
+        
+        payload = {
+            "v": APP_VERSION_NEW,
+            "type": "p2p12-contact",
+            "id": b64e(self.public_key),
+            "transports": transports,
+        }
+        return PREFIX_NEW + b64e(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
+
     @classmethod
     def load_or_create(cls, path: Path) -> "Identity":
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,10 +175,27 @@ class Identity:
 
 
 def parse_contact(blob: str) -> dict:
-    if not isinstance(blob, str) or not blob.strip().startswith(PREFIX):
-        raise ValueError("Contato RetroChat inválido.")
+    """Parse contatos em formato v2 (legado) ou v3 (novo com múltiplos transportes)."""
+    if not isinstance(blob, str):
+        raise ValueError("Contato inválido.")
+    
+    blob_stripped = blob.strip()
+    
+    # Tentar formato v3 (novo)
+    if blob_stripped.startswith(PREFIX_NEW):
+        return _parse_contact_v3(blob_stripped)
+    
+    # Tentar formato v2 (legado)
+    if blob_stripped.startswith(PREFIX):
+        return _parse_contact_v2(blob_stripped)
+    
+    raise ValueError("Contato inválido: prefixo desconhecido.")
+
+
+def _parse_contact_v2(blob: str) -> dict:
+    """Parse contato no formato v2 (legado RETROCHAT2)."""
     try:
-        encoded = blob.strip().split(".", 1)[1]
+        encoded = blob.split(".", 1)[1]
         payload = json.loads(b64d(encoded).decode("utf-8"))
     except Exception as exc:
         raise ValueError("Contato corrompido.") from exc
@@ -137,10 +215,113 @@ def parse_contact(blob: str) -> dict:
     if not 1 <= port <= 65535:
         raise ValueError("Porta inválida.")
 
-    payload["id_bytes"] = public_key
-    payload["host"] = host
-    payload["port"] = port
-    return payload
+    # Converter para formato normalizado interno
+    return {
+        "version": 2,
+        "id_bytes": public_key,
+        "transports": {
+            "tcp": {
+                "host": host,
+                "port": port,
+                "enabled": True,
+            }
+        },
+        "host": host,  # Manter para compatibilidade
+        "port": port,  # Manter para compatibilidade
+    }
+
+
+def _parse_contact_v3(blob: str) -> dict:
+    """Parse contato no formato v3 (novo P2P12 com múltiplos transportes)."""
+    try:
+        encoded = blob.split(".", 1)[1]
+        payload = json.loads(b64d(encoded).decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("Contato corrompido.") from exc
+
+    if payload.get("type") != "p2p12-contact" or payload.get("v") != APP_VERSION_NEW:
+        raise ValueError("Versão de contato incompatível.")
+
+    try:
+        public_key = b64d(payload["id"])
+        transports = payload.get("transports", {})
+    except (KeyError, ValueError, TypeError) as exc:
+        raise ValueError("Contato inválido.") from exc
+
+    if len(public_key) != 32:
+        raise ValueError("Chave pública inválida.")
+
+    if not transports:
+        raise ValueError("Contato sem transportes disponíveis.")
+
+    # Validar cada transporte
+    validated_transports = {}
+    
+    if "tcp" in transports:
+        tcp = transports["tcp"]
+        try:
+            host = str(tcp.get("host", "")).strip()
+            port = int(tcp.get("port", 0))
+            enabled = bool(tcp.get("enabled", True))
+            
+            if host and (1 <= port <= 65535):
+                validated_transports["tcp"] = {
+                    "host": host,
+                    "port": port,
+                    "enabled": enabled,
+                }
+        except (ValueError, TypeError):
+            pass
+    
+    if "tor" in transports:
+        tor = transports["tor"]
+        try:
+            onion = str(tor.get("onion", "")).strip()
+            port = int(tor.get("port", 0))
+            enabled = bool(tor.get("enabled", True))
+            
+            if onion and (1 <= port <= 65535):
+                validated_transports["tor"] = {
+                    "onion": onion,
+                    "port": port,
+                    "enabled": enabled,
+                }
+        except (ValueError, TypeError):
+            pass
+    
+    if "bluetooth" in transports:
+        bt = transports["bluetooth"]
+        try:
+            bt_id = str(bt.get("id", "")).strip()
+            enabled = bool(bt.get("enabled", True))
+            
+            if bt_id:
+                validated_transports["bluetooth"] = {
+                    "id": bt_id,
+                    "enabled": enabled,
+                }
+        except (ValueError, TypeError):
+            pass
+    
+    if not validated_transports:
+        raise ValueError("Contato sem transportes válidos.")
+    
+    # Retornar no formato normalizado
+    result = {
+        "version": 3,
+        "id_bytes": public_key,
+        "transports": validated_transports,
+    }
+    
+    # Adicionar campos TCP para compatibilidade (se disponível)
+    if "tcp" in validated_transports:
+        result["host"] = validated_transports["tcp"]["host"]
+        result["port"] = validated_transports["tcp"]["port"]
+    elif "tor" in validated_transports:
+        result["host"] = validated_transports["tor"]["onion"]
+        result["port"] = validated_transports["tor"]["port"]
+    
+    return result
 
 
 def make_client_handshake(identity: Identity, expected_peer_pub: bytes):
@@ -295,10 +476,23 @@ class SecureChannel:
         return self.aead.decrypt(nonce, ciphertext, aad)
 
 
-DEFAULT_PORT = 28473
+DEFAULT_PORT = 1212
 MAX_FRAME = 512 * 1024
 FILE_CHUNK = 48 * 1024
 MAX_FILE_SIZE = 512 * 1024 * 1024
+
+
+# Tor Expert Bundle oficial (ramo estável).
+TOR_EXPERT_BUNDLE_VERSION = "15.0.19"
+TOR_DAEMON_MIN_VERSION = "0.4.9.11"
+TOR_EXPERT_BUNDLE_FILENAME = (
+    f"tor-expert-bundle-windows-x86_64-{TOR_EXPERT_BUNDLE_VERSION}.tar.gz"
+)
+TOR_EXPERT_BUNDLE_URL = (
+    f"https://archive.torproject.org/tor-package-archive/torbrowser/"
+    f"{TOR_EXPERT_BUNDLE_VERSION}/{TOR_EXPERT_BUNDLE_FILENAME}"
+)
+TOR_DOWNLOAD_TIMEOUT = 60
 
 
 def _recv_exact(sock: socket.socket, size: int) -> bytes:
@@ -424,46 +618,37 @@ class PeerService:
     def set_expected_peer(self, pub: bytes) -> None:
         self.expected_peer_pub = bytes(pub)
 
-    def connect(self, host: str, port: int, expected: bytes) -> None:
+    # TCP agora é exclusivamente um transporte de rede local (LAN padrão ou LAN
+    # avançada via RadminVPN). Não há mais NAT/CGNAT a atravessar, então uma
+    # conexão direta deve responder rápido; timeout curto para não segurar o
+    # ConnectionManager antes de cair para o Tor (que é o transporte de internet).
+    LAN_CONNECT_TIMEOUT = 4.0
+
+    def connect_sync(
+        self,
+        host: str,
+        port: int,
+        expected: bytes,
+        cancel_event: threading.Event | None = None,
+    ) -> bool:
+        """Tenta uma conexão TCP direta (LAN) de forma síncrona e cancelável.
+
+        Roda dentro da própria thread do chamador (ConnectionManager), então não
+        existe mais uma thread "órfã" de conexão que continue tentando em segundo
+        plano depois que o chamador desistiu.
+        """
         if not host:
-            raise ValueError("O contato não contém um endereço de rede.")
+            raise ValueError("O contato não contém um endereço de rede (modo LAN).")
+        if cancel_event is not None and cancel_event.is_set():
+            raise ConnectionError("Cancelado.")
 
-        def runner():
-            last_error = None
-            for candidate_host, candidate_port in build_connect_candidates(host, int(port)):
-                try:
-                    self._client(candidate_host, candidate_port, bytes(expected))
-                    return
-                except Exception as exc:
-                    last_error = exc
-            if last_error is not None:
-                self.events.put(("error", str(last_error)))
-            else:
-                self.events.put(("error", "Não foi possível estabelecer a conexão usando os endpoints disponíveis."))
-
-        threading.Thread(
-            target=runner,
-            name="retrochat-connect",
-            daemon=True,
-        ).start()
-
-    def _connect_with_candidates(self, host: str, port: int, expected: bytes):
-        last_error = None
-        for candidate_host, candidate_port in build_connect_candidates(host, port):
-            try:
-                return self._client_attempt(candidate_host, candidate_port, expected)
-            except Exception as exc:  # pragma: no cover - fluxo de rede real
-                last_error = exc
-        if last_error is not None:
-            raise last_error
-        raise ConnectionError("Não foi possível estabelecer uma conexão usando nenhum endpoint disponível.")
-
-    def _client_attempt(self, host: str, port: int, expected: bytes):
         sock: socket.socket | None = None
         try:
-            self.events.put(("status", f"Conectando a {host}:{port}..."))
-            sock = socket.create_connection((host, port), timeout=10)
+            self.events.put(("status", f"Conectando via TCP (LAN) a {host}:{port}..."))
+            sock = socket.create_connection((host, int(port)), timeout=self.LAN_CONNECT_TIMEOUT)
             sock.settimeout(None)
+            if cancel_event is not None and cancel_event.is_set():
+                raise ConnectionError("Cancelado.")
             hello, eph = make_client_handshake(self.identity, expected)
             client_eph_pub = eph.public_key().public_bytes(
                 serialization.Encoding.Raw, serialization.PublicFormat.Raw
@@ -477,12 +662,18 @@ class PeerService:
             key = derive_session_key(eph, peer_eph, self.identity.public_key, expected)
             conn = Connection(sock, expected, SecureChannel(key), threading.Lock())
             self._set(conn)
-            self.events.put(("online", f"TCP em {host}:{port}"))
-            self._read_loop(conn)
+            self.events.put(("online", f"TCP (LAN) em {host}:{port}"))
+            threading.Thread(
+                target=self._read_loop,
+                args=(conn,),
+                name="retrochat-read-tcp",
+                daemon=True,
+            ).start()
             return True
-        except Exception:
+        except Exception as exc:
             _safe_socket_close(sock)
-            raise
+            message = "Conexão encerrada." if _is_socket_closed_error(exc) else str(exc)
+            raise ConnectionError(message) from exc
 
     def _accept_loop(self) -> None:
         assert self.server is not None
@@ -497,32 +688,6 @@ class PeerService:
                 name="retrochat-peer",
                 daemon=True,
             ).start()
-
-    def _client(self, host: str, port: int, expected: bytes) -> None:
-        sock: socket.socket | None = None
-        try:
-            self.events.put(("status", f"Conectando a {host}:{port}..."))
-            sock = socket.create_connection((host, port), timeout=10)
-            sock.settimeout(None)
-            hello, eph = make_client_handshake(self.identity, expected)
-            client_eph_pub = eph.public_key().public_bytes(
-                serialization.Encoding.Raw, serialization.PublicFormat.Raw
-            )
-            nonce = b64d(hello["n"])
-            _send(sock, hello)
-            reply = _recv(sock)
-            peer_eph = verify_server_handshake(
-                reply, expected, self.identity.public_key, client_eph_pub, nonce
-            )
-            key = derive_session_key(eph, peer_eph, self.identity.public_key, expected)
-            conn = Connection(sock, expected, SecureChannel(key), threading.Lock())
-            self._set(conn)
-            self.events.put(("online", "TCP"))
-            self._read_loop(conn)
-        except Exception as exc:
-            _safe_socket_close(sock)
-            message = "Conexão encerrada." if _is_socket_closed_error(exc) else str(exc)
-            self.events.put(("error", message))
 
     def _server(self, sock: socket.socket, address) -> None:
         try:
@@ -717,6 +882,660 @@ SERVICE_UUID = "9c8d0001-6e3b-4a57-9f09-726574726f01"
 CHAR_UUID = "9c8d0002-6e3b-4a57-9f09-726574726f02"
 
 
+# ============================================================
+# TOR
+# ============================================================
+
+class TorManager:
+    """Gerencia Tor como transporte P2P e Onion Service."""
+
+    def __init__(
+        self,
+        events: queue.Queue,
+        base_dir: Path,
+        settings: dict | None = None,
+        local_port: int = DEFAULT_PORT,
+    ):
+        self.events = events
+        self.base_dir = base_dir
+        self.settings = settings if isinstance(settings, dict) else {}
+        self.tor_dir = base_dir / "tor"
+        self.tor_dir.mkdir(parents=True, exist_ok=True)
+        self.bundle_dir = self.tor_dir / "expert_bundle"
+        self.bundle_dir.mkdir(parents=True, exist_ok=True)
+        self.bundle_download_dir = self.tor_dir / "downloads"
+        self.bundle_download_dir.mkdir(parents=True, exist_ok=True)
+        self.onion_service_dir = self.tor_dir / "onion_service"
+        self.onion_service_dir.mkdir(parents=True, exist_ok=True)
+
+        self.tor_process = None
+        self.control_port = 9051
+        self.socks_port = 9050
+        self.local_port = int(local_port)
+        self.enabled = False
+        self.onion_address = None
+        self.state = "OFFLINE"
+        self.tor_data_dir = self.tor_dir / "data"
+        self.tor_data_dir.mkdir(parents=True, exist_ok=True)
+        self.tor_executable = None
+        self.tor_version = None
+        self._start_lock = threading.Lock()
+
+    def _tor_settings(self) -> dict:
+        value = self.settings.get("tor")
+        if not isinstance(value, dict):
+            value = {}
+            self.settings["tor"] = value
+        return value
+
+    def _save_tor_setting(self, key: str, value) -> None:
+        self._tor_settings()[key] = value
+        try:
+            save_settings(self.base_dir, self.settings)
+        except Exception as exc:
+            self.events.put(("status", f"Não foi possível salvar configuração do Tor: {exc}"))
+
+    @staticmethod
+    def _version_tuple(version: str) -> tuple[int, ...]:
+        return tuple(int(item) for item in re.findall(r"\d+", str(version))[:4])
+
+    def _get_tor_version(self, tor_exe: str) -> str | None:
+        try:
+            result = subprocess.run(
+                [tor_exe, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+        output = f"{result.stdout}\n{result.stderr}"
+        match = re.search(
+            r"\bTor version\s+([0-9]+(?:\.[0-9]+)+)",
+            output,
+            re.IGNORECASE,
+        )
+        if not match:
+            match = re.search(
+                r"\bversion\s+([0-9]+(?:\.[0-9]+)+)",
+                output,
+                re.IGNORECASE,
+            )
+        return match.group(1) if match else None
+
+    def _is_tor_compatible(self, tor_exe: str) -> bool:
+        version = self._get_tor_version(tor_exe)
+        self.tor_version = version
+        if not version:
+            return False
+        return self._version_tuple(version) >= self._version_tuple(TOR_DAEMON_MIN_VERSION)
+
+    def start(self) -> bool:
+        """Garante um Tor utilizável e o inicia em segundo plano quando necessário."""
+        with self._start_lock:
+            return self._start_locked()
+
+    def _start_locked(self) -> bool:
+        if self.enabled and self._tor_already_running():
+            return True
+
+        if self._tor_already_running():
+            self.enabled = True
+            self.state = "ONLINE"
+            self._load_onion_address()
+            self.events.put(("tor_state", "ONLINE"))
+            return True
+
+        try:
+            self.state = "STARTING"
+            self.events.put(("tor_state", "STARTING"))
+
+            tor_exe = self._ensure_tor_executable()
+            self.tor_executable = tor_exe
+            self._save_tor_setting("executable", tor_exe)
+            if self.tor_version:
+                self._save_tor_setting("version", self.tor_version)
+
+            self._create_torrc(tor_exe)
+            self._start_tor_process(tor_exe)
+
+            if not self._wait_tor_bootstrap():
+                raise ConnectionError("Tor não inicializou no tempo esperado.")
+
+            self._load_onion_address()
+            if not self.onion_address:
+                self._generate_onion_address()
+
+            self.enabled = True
+            self.state = "ONLINE"
+            self.events.put(("tor_state", "ONLINE"))
+            return True
+
+        except Exception as exc:
+            self.state = "ERROR"
+            self.events.put(("tor_state", f"ERROR: {exc}"))
+            self.stop()
+            return False
+
+    def stop(self) -> None:
+        """Para somente o processo Tor iniciado por este aplicativo."""
+        if self.tor_process:
+            try:
+                self.tor_process.terminate()
+                self.tor_process.wait(timeout=5)
+            except Exception:
+                try:
+                    self.tor_process.kill()
+                except Exception:
+                    pass
+            self.tor_process = None
+
+        self.state = "OFFLINE"
+        self.events.put(("tor_state", "OFFLINE"))
+        self.enabled = False
+
+    def _find_tor_executable(self) -> str | None:
+        """Localiza o caminho configurado e, depois, uma instalação do sistema."""
+        configured = str(self._tor_settings().get("executable", "") or "").strip()
+        candidates = [Path(configured)] if configured else []
+
+        if platform.system() == "Windows":
+            command = "where"
+            common_paths = [
+                Path(r"C:\Program Files\Tor\tor.exe"),
+                Path(r"C:\Program Files (x86)\Tor\tor.exe"),
+            ]
+            try:
+                local_appdata = Path(os.environ.get("LOCALAPPDATA", ""))
+                if str(local_appdata):
+                    common_paths.extend(local_appdata.glob("Tor Browser/**/tor.exe"))
+            except Exception:
+                pass
+        else:
+            command = "which"
+            common_paths = [
+                Path("/usr/bin/tor"),
+                Path("/usr/local/bin/tor"),
+                Path("/opt/tor/bin/tor"),
+                Path("/opt/homebrew/bin/tor"),
+            ]
+
+        candidates.extend(common_paths)
+        try:
+            result = subprocess.run(
+                [command, "tor"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                candidates.append(Path(result.stdout.strip().splitlines()[0]))
+        except Exception:
+            pass
+
+        seen = set()
+        for candidate in candidates:
+            try:
+                resolved = str(candidate.expanduser().resolve())
+            except Exception:
+                resolved = str(candidate.expanduser())
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if os.path.isfile(resolved):
+                return resolved
+        return None
+
+    def _ensure_tor_executable(self) -> str:
+        """Retorna Tor compatível; no Windows baixa o Expert Bundle se necessário."""
+        found = self._find_tor_executable()
+
+        if found and self._is_tor_compatible(found):
+            self.events.put(("status", f"Tor encontrado: {self.tor_version}"))
+            return found
+
+        if found:
+            old_version = self.tor_version or "desconhecida"
+            self.events.put(
+                (
+                    "status",
+                    f"Tor encontrado, mas desatualizado ({old_version}). "
+                    "Baixando Tor Expert Bundle...",
+                )
+            )
+        else:
+            self.events.put(("status", "Tor não encontrado. Baixando Tor Expert Bundle..."))
+
+        if not bool(self._tor_settings().get("auto_download", True)):
+            raise FileNotFoundError(
+                "Tor compatível não encontrado e o download automático do Expert Bundle está desativado."
+            )
+
+        if platform.system() != "Windows":
+            raise FileNotFoundError(
+                "Tor compatível não encontrado automaticamente neste sistema. "
+                "O download automático do Expert Bundle está implementado para Windows x86_64."
+            )
+
+        if platform.machine().lower() not in {"amd64", "x86_64", "x64"}:
+            raise OSError("O Tor Expert Bundle configurado é para Windows x86_64.")
+
+        return self._download_and_install_expert_bundle()
+
+    def _download_and_install_expert_bundle(self) -> str:
+        """Baixa e extrai o Expert Bundle estável oficial."""
+        archive_path = self.bundle_download_dir / TOR_EXPERT_BUNDLE_FILENAME
+        extract_root = self.bundle_dir / TOR_EXPERT_BUNDLE_VERSION
+
+        if extract_root.exists():
+            tor_exe = next(extract_root.rglob("tor.exe"), None)
+            if tor_exe and self._is_tor_compatible(str(tor_exe)):
+                self.events.put(
+                    ("status", f"Tor Expert Bundle {TOR_EXPERT_BUNDLE_VERSION} já está instalado.")
+                )
+                self._save_tor_setting("bundle_version", TOR_EXPERT_BUNDLE_VERSION)
+                self._save_tor_setting("executable", str(tor_exe))
+                return str(tor_exe)
+
+        self.events.put(("status", f"Baixando Tor Expert Bundle {TOR_EXPERT_BUNDLE_VERSION}..."))
+        temporary_archive = archive_path.with_suffix(archive_path.suffix + ".part")
+        request = urllib.request.Request(
+            TOR_EXPERT_BUNDLE_URL,
+            headers={"User-Agent": "P2P12-TorManager/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=TOR_DOWNLOAD_TIMEOUT) as response:
+            with temporary_archive.open("wb") as handle:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+        os.replace(temporary_archive, archive_path)
+
+        self.events.put(("status", "Extraindo Tor Expert Bundle..."))
+        temp_extract = self.bundle_dir / f".extract-{TOR_EXPERT_BUNDLE_VERSION}"
+        if temp_extract.exists():
+            shutil.rmtree(temp_extract, ignore_errors=True)
+        temp_extract.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with tarfile.open(archive_path, "r:gz") as archive:
+                base = temp_extract.resolve()
+                for member in archive.getmembers():
+                    target = (temp_extract / member.name).resolve()
+                    if target != base and base not in target.parents:
+                        raise ValueError("Arquivo do Tor Expert Bundle contém caminho inválido.")
+                archive.extractall(temp_extract)
+
+            if extract_root.exists():
+                shutil.rmtree(extract_root, ignore_errors=True)
+            shutil.move(str(temp_extract), str(extract_root))
+        finally:
+            if temp_extract.exists():
+                shutil.rmtree(temp_extract, ignore_errors=True)
+
+        tor_exe = next(extract_root.rglob("tor.exe"), None)
+        if not tor_exe:
+            raise FileNotFoundError(
+                "O Tor Expert Bundle foi extraído, mas tor.exe não foi encontrado."
+            )
+
+        tor_exe = str(tor_exe)
+        if not self._is_tor_compatible(tor_exe):
+            raise RuntimeError(
+                f"O tor.exe baixado não atende à versão mínima {TOR_DAEMON_MIN_VERSION}."
+            )
+
+        self._save_tor_setting("executable", tor_exe)
+        self._save_tor_setting("bundle_version", TOR_EXPERT_BUNDLE_VERSION)
+        self._save_tor_setting("version", self.tor_version)
+        return tor_exe
+
+    def _create_torrc(self, tor_exe: str) -> None:
+        """Configura o Onion Service na porta real do PeerService."""
+        torrc_path = self.tor_dir / "torrc"
+        torrc_content = f"""# P2P-12 Tor Configuration
+SocksPort 127.0.0.1:{self.socks_port}
+ControlPort 127.0.0.1:{self.control_port}
+DataDirectory {self.tor_data_dir}
+HiddenServiceDir {self.onion_service_dir}
+HiddenServicePort {self.local_port} 127.0.0.1:{self.local_port}
+Log notice stdout
+"""
+        torrc_path.write_text(torrc_content, encoding="utf-8")
+
+    def _start_tor_process(self, tor_exe: str) -> None:
+        """Inicia Tor em segundo plano, sem abrir janela no Windows."""
+        torrc_path = self.tor_dir / "torrc"
+        self.tor_process = subprocess.Popen(
+            [tor_exe, "-f", str(torrc_path)],
+            cwd=str(Path(tor_exe).parent),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        for stream_name, stream in (("stdout", self.tor_process.stdout), ("stderr", self.tor_process.stderr)):
+            if stream is not None:
+                threading.Thread(target=self._read_tor_log_stream, args=(stream_name, stream), daemon=True, name=f"tor-log-{stream_name}").start()
+
+    def _read_tor_log_stream(self, stream_name: str, stream) -> None:
+        try:
+            for line in iter(stream.readline, ''):
+                line=line.rstrip()
+                if line:
+                    self.events.put(('tor_log', f'{stream_name}: {line}'))
+        except Exception as exc:
+            self.events.put(('tor_log', f'{stream_name}: {exc}'))
+
+    def _wait_tor_bootstrap(self, timeout: float = 60) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.tor_process and self.tor_process.poll() is not None:
+                return False
+            if self._tor_already_running():
+                time.sleep(1)
+                return True
+            time.sleep(0.5)
+        return False
+
+    def _tor_already_running(self) -> bool:
+        try:
+            with socket.create_connection(("127.0.0.1", self.control_port), timeout=1):
+                return True
+        except OSError:
+            return False
+
+    def _generate_onion_address(self) -> None:
+        for _ in range(100):
+            hostname_file = self.onion_service_dir / "hostname"
+            if hostname_file.exists():
+                self.onion_address = hostname_file.read_text(encoding="utf-8").strip()
+                return
+            time.sleep(0.1)
+        raise FileNotFoundError("Tor não criou hostname Onion.")
+
+    def _load_onion_address(self) -> None:
+        hostname_file = self.onion_service_dir / "hostname"
+        if hostname_file.exists():
+            self.onion_address = hostname_file.read_text(encoding="utf-8").strip()
+
+    def get_onion_address(self) -> str | None:
+        return self.onion_address
+
+    def is_online(self) -> bool:
+        return self.state == "ONLINE" and self.enabled
+
+def connect_via_socks5(host: str, port: int, socks_host: str = "127.0.0.1", socks_port: int = 9050, timeout: float = 10) -> socket.socket:
+    """Conecta a um host via SOCKS5."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    
+    try:
+        # Conectar ao proxy SOCKS5
+        sock.connect((socks_host, socks_port))
+        
+        # Enviar saudação SOCKS5: versão 5, sem autenticação
+        sock.sendall(b'\x05\x01\x00')
+        
+        # Receber resposta de saudação
+        response = sock.recv(2)
+        if len(response) < 2 or response[0] != 0x05:
+            raise ConnectionError("Resposta SOCKS5 inválida")
+        
+        # Enviar comando de conexão
+        # Formato: [VER=5][CMD=1][RSV=0][ATYP][DST.ADDR][DST.PORT]
+        host_bytes = host.encode('ascii')
+        
+        if host.endswith('.onion'):
+            # Tipo de endereço: nome de domínio
+            atyp = b'\x03'
+            addr_field = bytes([len(host_bytes)]) + host_bytes
+        else:
+            # Tentar como endereço IP
+            try:
+                ip_bytes = socket.inet_aton(host)
+                atyp = b'\x01'
+                addr_field = ip_bytes
+            except socket.error:
+                # Se não for IP, tratar como nome de domínio
+                atyp = b'\x03'
+                addr_field = bytes([len(host_bytes)]) + host_bytes
+        
+        # Porta em big-endian
+        port_bytes = struct.pack('!H', port)
+        
+        # Montar comando de conexão
+        command = b'\x05\x01\x00' + atyp + addr_field + port_bytes
+        sock.sendall(command)
+        
+        # Receber resposta de conexão
+        response = sock.recv(1024)
+        if len(response) < 2 or response[0] != 0x05:
+            raise ConnectionError("Resposta de conexão SOCKS5 inválida")
+        
+        if response[1] != 0x00:
+            error_messages = {
+                0x01: "Erro geral SOCKS",
+                0x02: "Conexão não permitida",
+                0x03: "Rede indisponível",
+                0x04: "Host indisponível",
+                0x05: "Conexão recusada",
+                0x06: "TTL expirado",
+                0x07: "Comando não suportado",
+                0x08: "Tipo de endereço não suportado",
+            }
+            error_msg = error_messages.get(response[1], f"Erro SOCKS5: {response[1]}")
+            raise ConnectionError(error_msg)
+        
+        return sock
+    
+    except Exception:
+        sock.close()
+        raise
+
+
+def _recv_exact_socks(sock: socket.socket, size: int) -> bytes:
+    """Recebe exatamente 'size' bytes, tratando como dados SOCKS5."""
+    data = bytearray()
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise ConnectionError("Conexão SOCKS5 encerrada.")
+        data.extend(chunk)
+    return bytes(data)
+
+
+# ============================================================
+# CONNECTION MANAGER
+# ============================================================
+
+class ConnectionManager:
+    """Gerencia tentativas de conexão através de múltiplos transportes."""
+    
+    def __init__(self, identity: "Identity", events: queue.Queue, service: "PeerService", tor_manager: TorManager, settings: dict):
+        self.identity = identity
+        self.events = events
+        self.service = service
+        self.tor_manager = tor_manager
+        self.settings = settings
+        
+        self.peer_data = None
+        self.cancel_event = threading.Event()
+        self.attempt_thread = None
+        self.current_transport = None
+        self.state = "OFFLINE"
+    
+    def connect(self, peer_data: dict) -> None:
+        """Inicia tentativa de conexão para o peer fornecido."""
+        self.peer_data = peer_data
+        self.cancel_event.clear()
+        self.current_transport = None
+        self.state = "CONNECTING"
+        
+        self.attempt_thread = threading.Thread(
+            target=self._attempt_connection,
+            name="retrochat-connect-manager",
+            daemon=True
+        )
+        self.attempt_thread.start()
+    
+    def cancel(self) -> None:
+        """Cancela a tentativa de conexão em andamento."""
+        self.cancel_event.set()
+        self.state = "CANCELLED"
+        self.events.put(("status", "Conexão cancelada."))
+    
+    def _attempt_connection(self) -> None:
+        """Tenta conectar através dos transportes habilitados."""
+        try:
+            transports = self.peer_data.get("transports", {})
+            
+            # Lista de transportes a tentar (TCP primeiro, depois Tor)
+            attempts = []
+            
+            if self.settings['transports']['tcp'] and 'tcp' in transports:
+                attempts.append(('tcp', transports['tcp']))
+            
+            if self.settings['transports']['tor'] and 'tor' in transports:
+                attempts.append(('tor', transports['tor']))
+            
+            if not attempts:
+                self.events.put(("status", "Nenhum transporte disponível."))
+                self.state = "ERROR"
+                return
+            
+            # Tentar transportes em ordem
+            for transport_name, transport_config in attempts:
+                if self.cancel_event.is_set():
+                    self.state = "CANCELLED"
+                    return
+                
+                try:
+                    if transport_name == 'tcp':
+                        self._try_tcp(transport_config)
+                    elif transport_name == 'tor':
+                        self._try_tor(transport_config)
+                    
+                    # Se chegou aqui, a conexão foi bem-sucedida
+                    self.current_transport = transport_name
+                    self.state = "ONLINE"
+                    self.events.put(("status", f"ONLINE — {transport_name.upper()}"))
+                    return
+                except Exception as e:
+                    self.events.put(("status", f"Falha em {transport_name}: {e}"))
+                    continue
+            
+            # Se nenhum transporte funcionou
+            self.state = "ERROR"
+            self.events.put(("status", "Falha ao conectar em todos os transportes."))
+        
+        except Exception as e:
+            self.state = "ERROR"
+            self.events.put(("status", f"Erro na conexão: {e}"))
+    
+    def _try_tcp(self, config: dict) -> None:
+        """Tenta conectar via TCP (modo LAN — rede local ou LAN avançada via RadminVPN)."""
+        host = config.get('host', '')
+        port = config.get('port', DEFAULT_PORT)
+        
+        if not host:
+            raise ValueError("Host TCP não configurado.")
+        
+        # Síncrono e cancelável: roda na própria thread deste ConnectionManager,
+        # então quando desistimos aqui não fica nenhuma tentativa "órfã" tentando
+        # se conectar em segundo plano e sobrescrevendo uma conexão Tor posterior.
+        self.service.connect_sync(host, port, self.peer_data['id_bytes'], self.cancel_event)
+    
+    def _try_tor(self, config: dict) -> None:
+        """Tenta conectar via Tor com retentativas."""
+        onion = config.get('onion', '')
+        port = config.get('port', DEFAULT_PORT)
+        
+        if not onion:
+            raise ValueError("Endereço Onion não configurado.")
+
+        # Iniciar/reutilizar o Tor somente quando o transporte Tor for usado.
+        if not self.tor_manager.start():
+            raise ConnectionError("Não foi possível iniciar o Tor.")
+        
+        # Tentar Tor até sucesso ou cancelamento
+        attempt_count = 0
+        while not self.cancel_event.is_set():
+            attempt_count += 1
+            self.events.put(("status", f"Conectando via Tor (tentativa #{attempt_count})..."))
+            
+            try:
+                self._tor_attempt(onion, port)
+                return  # Sucesso
+            except Exception as e:
+                if attempt_count > 100:  # Limite de 100 tentativas
+                    raise ConnectionError(f"Limite de tentativas Tor excedido: {e}")
+                
+                # Pequeno delay antes de tentar novamente
+                for _ in range(20):  # ~2 segundos
+                    if self.cancel_event.is_set():
+                        raise ConnectionError("Cancelado.")
+                    threading.Event().wait(0.1)
+    
+    def _tor_attempt(self, onion: str, port: int) -> None:
+        """Uma única tentativa de conexão via Tor."""
+        sock = None
+        try:
+            # Conectar via SOCKS5
+            sock = connect_via_socks5(onion, port, timeout=10)
+            sock.settimeout(None)
+            
+            # Fazer handshake
+            hello, eph = make_client_handshake(self.identity, self.peer_data['id_bytes'])
+            client_eph_pub = eph.public_key().public_bytes(
+                serialization.Encoding.Raw, serialization.PublicFormat.Raw
+            )
+            nonce = b64d(hello["n"])
+            
+            _send(sock, hello)
+            reply = _recv(sock)
+            
+            peer_eph = verify_server_handshake(
+                reply, self.peer_data['id_bytes'], self.identity.public_key, client_eph_pub, nonce
+            )
+            
+            key = derive_session_key(eph, peer_eph, self.identity.public_key, self.peer_data['id_bytes'])
+            
+            # Conexão bem-sucedida - configurar no serviço
+            channel = SecureChannel(key)
+            conn = Connection(
+                sock=sock,
+                peer_pub=self.peer_data['id_bytes'],
+                channel=channel,
+                send_lock=threading.Lock()
+            )
+            
+            self.service._set(conn)
+            self.service.events.put(("online", "Tor"))
+            
+            # Iniciar read loop em thread separada
+            threading.Thread(
+                target=self.service._read_loop,
+                args=(conn,),
+                name="retrochat-read",
+                daemon=True
+            ).start()
+        
+        except Exception:
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            raise
+
+
 class BluetoothManager:
     """BLE discovery layer.
 
@@ -807,6 +1626,20 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps(self.app.info(), ensure_ascii=False))
             if parsed.path == "/api/poll":
                 return self._send(200, json.dumps(self.app.poll(), ensure_ascii=False))
+            if parsed.path == "/api/settings":
+                return self._send(200, json.dumps(self.app.get_settings(), ensure_ascii=False))
+            if parsed.path == "/api/tor/status":
+                return self._send(200, json.dumps({
+                    "enabled": self.app.tor.enabled,
+                    "state": self.app.tor.state,
+                    "onion_address": self.app.tor.get_onion_address(),
+                    "executable": self.app.tor.tor_executable,
+                    "version": self.app.tor.tor_version,
+                }, ensure_ascii=False))
+            if parsed.path == "/api/debug/logs":
+                return self._send(200, json.dumps({"logs": self.app.get_debug_logs()}, ensure_ascii=False))
+            if parsed.path == "/api/radminvpn/status":
+                return self._send(200, json.dumps({"mode": self.app.settings.get('tcp', {}).get('mode', 'standard'), "ip": self.app.get_radminvpn_ip()}, ensure_ascii=False))
             if parsed.path.startswith("/download/"):
                 name = Path(urllib.parse.unquote(parsed.path[len("/download/"):])).name
                 root = self.app.download_dir.resolve()
@@ -848,7 +1681,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                             "ok": True,
                             "fingerprint": self.app.peer_fingerprint,
                             "host": peer.get("host", ""),
-                            "port": peer.get("port", 28473),
+                            "port": peer.get("port", DEFAULT_PORT),
                         },
                         ensure_ascii=False,
                     ),
@@ -856,6 +1689,10 @@ class ApiHandler(BaseHTTPRequestHandler):
 
             if self.path == "/api/connect":
                 self.app.connect()
+                return self._send(200, '{"ok":true}')
+
+            if self.path == "/api/cancel":
+                self.app.cancel_connect()
                 return self._send(200, '{"ok":true}')
 
             if self.path == "/api/message":
@@ -871,6 +1708,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if not self.app.bluetooth.scan():
                     raise RuntimeError("Bluetooth indisponível ou uma busca já está em andamento.")
                 return self._send(200, '{"ok":true}')
+
+            if self.path == "/api/settings":
+                new_settings = self._json()
+                self.app.set_settings(new_settings)
+                return self._send(200, json.dumps(self.app.get_settings(), ensure_ascii=False))
 
             return self._send(404, b"Not found", "text/plain; charset=utf-8")
         except Exception as exc:
@@ -994,131 +1836,153 @@ def local_ip():
     finally:s.close()
 
 
-def _is_private_ip(value: str) -> bool:
+def load_settings(base_dir: Path) -> dict:
+    """Carrega as configurações do usuário ou retorna padrões."""
+    settings_file = base_dir / 'settings.json'
+    defaults = {
+        'transports': {
+            'tcp': True,
+            'tor': True,
+            'bluetooth': False,
+        },
+        'tcp': {'mode': 'standard'},
+        'tor': {
+            'executable': '',
+            'version': '',
+            'bundle_version': '',
+            'auto_download': True,
+        },
+        'theme': 'dark',
+    }
+    if not settings_file.exists():
+        return defaults
     try:
-        ip = ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
+        with settings_file.open('r', encoding='utf-8') as f:
+            data = json.load(f)
+        # Garantir que todas as chaves necessárias existem
+        if 'transports' not in data:
+            data['transports'] = defaults['transports']
+        if 'theme' not in data:
+            data['theme'] = defaults['theme']
+        if 'tcp' not in data or not isinstance(data['tcp'], dict):
+            data['tcp'] = {}
+        if data['tcp'].get('mode') not in {'standard', 'radminvpn'}:
+            data['tcp']['mode'] = 'standard'
+        if 'tor' not in data or not isinstance(data['tor'], dict):
+            data['tor'] = {}
+        for key, value in defaults['tor'].items():
+            if key not in data['tor']:
+                data['tor'][key] = value
+        # Garantir que todos os transportes estão presentes
+        for transport in defaults['transports']:
+            if transport not in data['transports']:
+                data['transports'][transport] = defaults['transports'][transport]
+        return data
+    except (json.JSONDecodeError, OSError):
+        return defaults
 
 
-def _stun_binding(stun_host: str, stun_port: int = 3478, timeout: float = 1.5):
-    """Consulta um servidor STUN e retorna o endpoint público mapeado pela NAT."""
-    if not stun_host:
-        return None
+def save_settings(base_dir: Path, settings: dict) -> None:
+    """Salva as configurações do usuário."""
+    settings_file = base_dir / 'settings.json'
     try:
-        msg = b"\x00\x01\x00\x00" + struct.pack("!I", 0x2112A442) + os.urandom(12)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(timeout)
-        sock.sendto(msg, (stun_host, int(stun_port)))
-        data, _ = sock.recvfrom(2048)
-        sock.close()
-    except (OSError, socket.timeout):
-        return None
-
-    if len(data) < 20:
-        return None
-    try:
-        msg_type = struct.unpack("!H", data[0:2])[0]
-        if msg_type != 0x0101:
-            return None
-        length = struct.unpack("!H", data[2:4])[0]
-        if len(data) < 20 + length:
-            return None
-        pos = 20
-        while pos + 4 <= len(data):
-            attr_type, attr_len = struct.unpack("!HH", data[pos:pos + 4])
-            pos += 4
-            value = data[pos:pos + attr_len]
-            pos += attr_len
-            if attr_type == 0x0020 and len(value) >= 8:
-                family = value[1]
-                if family == 0x01:
-                    xor_port = struct.unpack("!H", value[2:4])[0]
-                    xor_ip = struct.unpack("!I", value[4:8])[0]
-                    port = xor_port ^ ((0x2112A442 >> 16) & 0xFFFF)
-                    ip_int = xor_ip ^ 0x2112A442
-                    return socket.inet_ntoa(struct.pack("!I", ip_int)), int(port)
-    except Exception:
-        return None
-    return None
-
-
-def resolve_public_endpoint(host: str | None = None, port: int = DEFAULT_PORT, timeout: float = 1.5):
-    """Tenta descobrir um endpoint público para conectar mesmo atrás de NAT/CGNAT."""
-    if host and not _is_private_ip(host):
-        return host, int(port)
-    stun_servers = [
-        os.environ.get("RETROCHAT_STUN_HOST", "stun.l.google.com"),
-        "stun1.l.google.com",
-        "stun.cloudflare.com",
-    ]
-    for stun_host in stun_servers:
-        result = _stun_binding(stun_host, 3478, timeout=timeout)
-        if result:
-            return result
-    return host or local_ip(), int(port)
-
-
-def build_connect_candidates(host: str, port: int):
-    """Ordena uma sequência de tentativas de conexão para NAT/CGNAT, começando pelo host direto."""
-    seen = set()
-    candidates = []
-    hinted = [
-        (host or local_ip(), int(port)),
-        (resolve_public_endpoint(host, port)[0], resolve_public_endpoint(host, port)[1]),
-    ]
-    if os.environ.get("RETROCHAT_RELAY_HOST"):
-        relay_port = int(os.environ.get("RETROCHAT_RELAY_PORT", "28474"))
-        hinted.append((os.environ["RETROCHAT_RELAY_HOST"], relay_port))
-    for candidate_host, candidate_port in hinted:
-        key = (str(candidate_host), int(candidate_port))
-        if key in seen:
-            continue
-        seen.add(key)
-        candidates.append((str(candidate_host), int(candidate_port)))
-    return candidates
+        with settings_file.open('w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
+    except OSError as e:
+        print(f'Erro ao salvar configurações: {e}', file=sys.stderr)
 
 
 class App:
     def __init__(self, profile=None):
         self.base=data_dir(profile); self.base.mkdir(parents=True,exist_ok=True); self.download_dir=self.base/'Downloads'; self.download_dir.mkdir(exist_ok=True); self.temp_dir=self.base/'tmp'; self.temp_dir.mkdir(exist_ok=True)
+        self.settings = load_settings(self.base)
         self.identity = Identity.load_or_create(self.base / 'identity.key')
-        self.events = queue.Queue()
+        self.log_buffer = BackendLog()
+        self.log_buffer.add('APP', 'Backend iniciado.')
+        self.events = EventQueue(self.log_buffer)
         requested_port = int(os.environ.get('RETROCHAT_PORT', DEFAULT_PORT))
         self.service = PeerService(self.identity, requested_port, self.events, self.download_dir)
         self.service.start()
         self.port = self.service.port
         self.peer = None
         self.peer_fingerprint = ''
+        self.tor = TorManager(
+            self.events,
+            self.base,
+            self.settings,
+            local_port=self.port,
+        )
         self.bluetooth = BluetoothManager(self.events)
-        self.bluetooth.start()
+        if self.settings['transports']['bluetooth']:
+            self.bluetooth.start()
+        if self.settings['transports']['tor']:
+            threading.Thread(target=self.tor.start, name="retrochat-tor-boot", daemon=True).start()
+        self.connection_manager = ConnectionManager(self.identity, self.events, self.service, self.tor, self.settings)
         self.http = ApiServer(self)
         self.web_port = self.http.start()
         self.html = HTML
+    def get_debug_logs(self, limit: int = 1000):
+        return self.log_buffer.snapshot(limit)
+
+    def get_radminvpn_ip(self) -> str | None:
+        if platform.system() != 'Windows':
+            return None
+        try:
+            result = subprocess.run(['ipconfig'], capture_output=True, text=True, encoding='mbcs', errors='replace', timeout=5, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except Exception:
+            return None
+        in_radmin = False
+        fallback = None
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if stripped and not line[:1].isspace():
+                in_radmin = 'radmin vpn' in stripped.lower()
+                continue
+            m = re.search(r'(?:IPv4[^:]*|Endere[cç]o IPv4[^:]*):\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})', stripped, re.I)
+            if m:
+                ip=m.group(1)
+                if in_radmin and ip.startswith('26.'):
+                    return ip
+                if ip.startswith('26.') and fallback is None:
+                    fallback=ip
+        return fallback
+
+    def get_tcp_host(self, lan_host: str) -> str:
+        """TCP é sempre um transporte de rede local: 'standard' anuncia o IP da
+        LAN normal; 'radminvpn' anuncia o IP da rede virtual RadminVPN (LAN
+        avançada), que só existe para permitir esse mesmo tipo de conexão direta
+        entre redes físicas diferentes."""
+        if self.settings.get('tcp', {}).get('mode', 'standard') == 'radminvpn':
+            ip = self.get_radminvpn_ip()
+            if ip:
+                return ip
+            self.log_buffer.add('APP', 'Modo RadminVPN ativo, mas o adaptador Radmin VPN não foi detectado; usando o IP de LAN padrão.')
+        return lan_host
+
     def info(self):
-        host=local_ip()
-        relay_host = os.environ.get('RETROCHAT_RELAY_HOST')
-        relay_port = int(os.environ.get('RETROCHAT_RELAY_PORT', DEFAULT_PORT))
-        if relay_host:
-            contact_host, contact_port = relay_host, relay_port
-        else:
-            try:
-                contact_host, contact_port = resolve_public_endpoint(host, self.port, timeout=1.0)
-            except Exception:
-                contact_host, contact_port = host, self.port
+        lan_host = local_ip()
+        tcp_host = self.get_tcp_host(lan_host)
+        tor_onion = self.tor.get_onion_address() if self.tor.is_online() else ''
+        # Sempre no formato v3: TCP (LAN) e Tor (internet) juntos, para que o
+        # modo RadminVPN e o estado atual do Tor sejam sempre respeitados no
+        # contato copiado — nunca mais um formato "silenciosamente" incompleto.
+        contact = self.identity.contact_blob_v3(
+            tcp_host=tcp_host,
+            tcp_port=self.port,
+            tor_onion=tor_onion,
+        )
         return {
             'fingerprint': self.identity.fingerprint,
-            'contact': self.identity.contact_blob(contact_host, contact_port),
-            'host': host,
+            'contact': contact,
+            'tor_onion': tor_onion,
+            'tor_state': self.tor.state,
+            'host': lan_host,
+            'tcp_host': tcp_host,
+            'tcp_mode': self.settings.get('tcp', {}).get('mode', 'standard'),
+            'radminvpn_ip': self.get_radminvpn_ip(),
             'port': self.port,
             'platform': platform.system(),
             'status': 'Aguardando conexão',
-            'nat': {
-                'public_ip': contact_host,
-                'public_port': contact_port,
-                'relay': relay_host,
-            },
         }
     def set_peer(self, p):
         self.peer = p
@@ -1126,9 +1990,11 @@ class App:
         self.service.set_expected_peer(p['id_bytes'])
     def connect(self):
         if not self.peer: raise ValueError('Adicione um contato primeiro.')
-        host = self.peer.get('host') or ''
-        port = int(self.peer.get('port') or DEFAULT_PORT)
-        self.service.connect(host, port, self.peer['id_bytes'])
+        # Usar o ConnectionManager para tentar múltiplos transportes
+        self.connection_manager.connect(self.peer)
+    def cancel_connect(self):
+        """Cancela a tentativa de conexão em andamento."""
+        self.connection_manager.cancel()
     def poll(self):
         out=[]
         while True:
@@ -1140,9 +2006,29 @@ class App:
                 else: out.append(e)
             except queue.Empty:break
         return out
+    def get_settings(self):
+        """Retorna as configurações atuais do usuário."""
+        return dict(self.settings)
+    def set_settings(self, new_settings: dict) -> None:
+        """Atualiza e salva as configurações do usuário."""
+        # Validar e mesclar com as configurações atuais
+        if 'transports' in new_settings:
+            tor_was_enabled = self.settings['transports'].get('tor', False)
+            self.settings['transports'].update(new_settings['transports'])
+            if self.settings['transports'].get('tor') and not tor_was_enabled and not self.tor.is_online():
+                threading.Thread(target=self.tor.start, name="retrochat-tor-boot", daemon=True).start()
+        if 'tcp' in new_settings and isinstance(new_settings['tcp'], dict):
+            mode = new_settings['tcp'].get('mode', self.settings.get('tcp', {}).get('mode', 'standard'))
+            if mode not in {'standard', 'radminvpn'}:
+                raise ValueError('Modo TCP inválido.')
+            self.settings.setdefault('tcp', {})['mode'] = mode
+        if 'theme' in new_settings:
+            self.settings['theme'] = new_settings['theme']
+        save_settings(self.base, self.settings)
     def shutdown(self):
         self.http.stop()
         self.service.stop()
+        self.tor.stop()
         self.bluetooth.stop()
 
 def main():
