@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
 import mimetypes
 import os
@@ -328,6 +329,34 @@ def _send(sock: socket.socket, obj: dict) -> None:
     sock.sendall(struct.pack("!I", len(data)) + data)
 
 
+def _safe_socket_shutdown(sock: socket.socket | None) -> None:
+    if not isinstance(sock, socket.socket):
+        return
+    try:
+        if sock.fileno() != -1:
+            sock.shutdown(socket.SHUT_RDWR)
+    except (OSError, ValueError):
+        pass
+
+
+def _safe_socket_close(sock: socket.socket | None) -> None:
+    if not isinstance(sock, socket.socket):
+        return
+    try:
+        if sock.fileno() != -1:
+            sock.close()
+    except (OSError, ValueError):
+        pass
+
+
+def _is_socket_closed_error(exc: BaseException) -> bool:
+    if not isinstance(exc, OSError):
+        return False
+    winerr = getattr(exc, "winerror", None)
+    errnum = getattr(exc, "errno", None)
+    return winerr == 10038 or errnum in {9, 10038}
+
+
 @dataclass
 class Connection:
     sock: socket.socket
@@ -380,19 +409,10 @@ class PeerService:
             conn = self.conn
             self.conn = None
         if conn:
-            try:
-                conn.sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                conn.sock.close()
-            except OSError:
-                pass
+            _safe_socket_shutdown(conn.sock)
+            _safe_socket_close(conn.sock)
         if self.server:
-            try:
-                self.server.close()
-            except OSError:
-                pass
+            _safe_socket_close(self.server)
             self.server = None
         for item in list(self.incoming_files.values()):
             try:
@@ -407,12 +427,62 @@ class PeerService:
     def connect(self, host: str, port: int, expected: bytes) -> None:
         if not host:
             raise ValueError("O contato não contém um endereço de rede.")
+
+        def runner():
+            last_error = None
+            for candidate_host, candidate_port in build_connect_candidates(host, int(port)):
+                try:
+                    self._client(candidate_host, candidate_port, bytes(expected))
+                    return
+                except Exception as exc:
+                    last_error = exc
+            if last_error is not None:
+                self.events.put(("error", str(last_error)))
+            else:
+                self.events.put(("error", "Não foi possível estabelecer a conexão usando os endpoints disponíveis."))
+
         threading.Thread(
-            target=self._client,
-            args=(host, int(port), bytes(expected)),
+            target=runner,
             name="retrochat-connect",
             daemon=True,
         ).start()
+
+    def _connect_with_candidates(self, host: str, port: int, expected: bytes):
+        last_error = None
+        for candidate_host, candidate_port in build_connect_candidates(host, port):
+            try:
+                return self._client_attempt(candidate_host, candidate_port, expected)
+            except Exception as exc:  # pragma: no cover - fluxo de rede real
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise ConnectionError("Não foi possível estabelecer uma conexão usando nenhum endpoint disponível.")
+
+    def _client_attempt(self, host: str, port: int, expected: bytes):
+        sock: socket.socket | None = None
+        try:
+            self.events.put(("status", f"Conectando a {host}:{port}..."))
+            sock = socket.create_connection((host, port), timeout=10)
+            sock.settimeout(None)
+            hello, eph = make_client_handshake(self.identity, expected)
+            client_eph_pub = eph.public_key().public_bytes(
+                serialization.Encoding.Raw, serialization.PublicFormat.Raw
+            )
+            nonce = b64d(hello["n"])
+            _send(sock, hello)
+            reply = _recv(sock)
+            peer_eph = verify_server_handshake(
+                reply, expected, self.identity.public_key, client_eph_pub, nonce
+            )
+            key = derive_session_key(eph, peer_eph, self.identity.public_key, expected)
+            conn = Connection(sock, expected, SecureChannel(key), threading.Lock())
+            self._set(conn)
+            self.events.put(("online", f"TCP em {host}:{port}"))
+            self._read_loop(conn)
+            return True
+        except Exception:
+            _safe_socket_close(sock)
+            raise
 
     def _accept_loop(self) -> None:
         assert self.server is not None
@@ -450,12 +520,9 @@ class PeerService:
             self.events.put(("online", "TCP"))
             self._read_loop(conn)
         except Exception as exc:
-            if sock:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-            self.events.put(("error", str(exc)))
+            _safe_socket_close(sock)
+            message = "Conexão encerrada." if _is_socket_closed_error(exc) else str(exc)
+            self.events.put(("error", message))
 
     def _server(self, sock: socket.socket, address) -> None:
         try:
@@ -477,25 +544,17 @@ class PeerService:
             self.events.put(("online", f"TCP de {address[0]}"))
             self._read_loop(conn)
         except Exception as exc:
-            try:
-                sock.close()
-            except OSError:
-                pass
-            self.events.put(("error", str(exc)))
+            _safe_socket_close(sock)
+            message = "Conexão encerrada." if _is_socket_closed_error(exc) else str(exc)
+            self.events.put(("error", message))
 
     def _set(self, conn: Connection) -> None:
         with self.lock:
             old = self.conn
             self.conn = conn
         if old and old.sock is not conn.sock:
-            try:
-                old.sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                old.sock.close()
-            except OSError:
-                pass
+            _safe_socket_shutdown(old.sock)
+            _safe_socket_close(old.sock)
 
     def _read_loop(self, conn: Connection) -> None:
         try:
@@ -518,14 +577,13 @@ class PeerService:
                 else:
                     raise ValueError("Tipo de pacote desconhecido.")
         except Exception as exc:
-            self.events.put(("offline", str(exc)))
+            message = "Conexão encerrada." if _is_socket_closed_error(exc) else str(exc)
+            self.events.put(("offline", message))
             with self.lock:
                 if self.conn is conn:
                     self.conn = None
-            try:
-                conn.sock.close()
-            except OSError:
-                pass
+            _safe_socket_shutdown(conn.sock)
+            _safe_socket_close(conn.sock)
 
     def _secure_send(self, obj: dict, aad: bytes = b"MSG") -> bool:
         with self.lock:
@@ -935,6 +993,93 @@ def local_ip():
     except OSError:return '127.0.0.1'
     finally:s.close()
 
+
+def _is_private_ip(value: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved
+
+
+def _stun_binding(stun_host: str, stun_port: int = 3478, timeout: float = 1.5):
+    """Consulta um servidor STUN e retorna o endpoint público mapeado pela NAT."""
+    if not stun_host:
+        return None
+    try:
+        msg = b"\x00\x01\x00\x00" + struct.pack("!I", 0x2112A442) + os.urandom(12)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        sock.sendto(msg, (stun_host, int(stun_port)))
+        data, _ = sock.recvfrom(2048)
+        sock.close()
+    except (OSError, socket.timeout):
+        return None
+
+    if len(data) < 20:
+        return None
+    try:
+        msg_type = struct.unpack("!H", data[0:2])[0]
+        if msg_type != 0x0101:
+            return None
+        length = struct.unpack("!H", data[2:4])[0]
+        if len(data) < 20 + length:
+            return None
+        pos = 20
+        while pos + 4 <= len(data):
+            attr_type, attr_len = struct.unpack("!HH", data[pos:pos + 4])
+            pos += 4
+            value = data[pos:pos + attr_len]
+            pos += attr_len
+            if attr_type == 0x0020 and len(value) >= 8:
+                family = value[1]
+                if family == 0x01:
+                    xor_port = struct.unpack("!H", value[2:4])[0]
+                    xor_ip = struct.unpack("!I", value[4:8])[0]
+                    port = xor_port ^ ((0x2112A442 >> 16) & 0xFFFF)
+                    ip_int = xor_ip ^ 0x2112A442
+                    return socket.inet_ntoa(struct.pack("!I", ip_int)), int(port)
+    except Exception:
+        return None
+    return None
+
+
+def resolve_public_endpoint(host: str | None = None, port: int = DEFAULT_PORT, timeout: float = 1.5):
+    """Tenta descobrir um endpoint público para conectar mesmo atrás de NAT/CGNAT."""
+    if host and not _is_private_ip(host):
+        return host, int(port)
+    stun_servers = [
+        os.environ.get("RETROCHAT_STUN_HOST", "stun.l.google.com"),
+        "stun1.l.google.com",
+        "stun.cloudflare.com",
+    ]
+    for stun_host in stun_servers:
+        result = _stun_binding(stun_host, 3478, timeout=timeout)
+        if result:
+            return result
+    return host or local_ip(), int(port)
+
+
+def build_connect_candidates(host: str, port: int):
+    """Ordena uma sequência de tentativas de conexão para NAT/CGNAT, começando pelo host direto."""
+    seen = set()
+    candidates = []
+    hinted = [
+        (host or local_ip(), int(port)),
+        (resolve_public_endpoint(host, port)[0], resolve_public_endpoint(host, port)[1]),
+    ]
+    if os.environ.get("RETROCHAT_RELAY_HOST"):
+        relay_port = int(os.environ.get("RETROCHAT_RELAY_PORT", "28474"))
+        hinted.append((os.environ["RETROCHAT_RELAY_HOST"], relay_port))
+    for candidate_host, candidate_port in hinted:
+        key = (str(candidate_host), int(candidate_port))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append((str(candidate_host), int(candidate_port)))
+    return candidates
+
+
 class App:
     def __init__(self, profile=None):
         self.base=data_dir(profile); self.base.mkdir(parents=True,exist_ok=True); self.download_dir=self.base/'Downloads'; self.download_dir.mkdir(exist_ok=True); self.temp_dir=self.base/'tmp'; self.temp_dir.mkdir(exist_ok=True)
@@ -952,14 +1097,38 @@ class App:
         self.web_port = self.http.start()
         self.html = HTML
     def info(self):
-        host=local_ip(); return {'fingerprint':self.identity.fingerprint,'contact':self.identity.contact_blob(host,self.port),'host':host,'port':self.port,'platform':platform.system(),'status':'Aguardando conexão'}
+        host=local_ip()
+        relay_host = os.environ.get('RETROCHAT_RELAY_HOST')
+        relay_port = int(os.environ.get('RETROCHAT_RELAY_PORT', DEFAULT_PORT))
+        if relay_host:
+            contact_host, contact_port = relay_host, relay_port
+        else:
+            try:
+                contact_host, contact_port = resolve_public_endpoint(host, self.port, timeout=1.0)
+            except Exception:
+                contact_host, contact_port = host, self.port
+        return {
+            'fingerprint': self.identity.fingerprint,
+            'contact': self.identity.contact_blob(contact_host, contact_port),
+            'host': host,
+            'port': self.port,
+            'platform': platform.system(),
+            'status': 'Aguardando conexão',
+            'nat': {
+                'public_ip': contact_host,
+                'public_port': contact_port,
+                'relay': relay_host,
+            },
+        }
     def set_peer(self, p):
         self.peer = p
         self.peer_fingerprint = fingerprint(p['id_bytes'])
         self.service.set_expected_peer(p['id_bytes'])
     def connect(self):
         if not self.peer: raise ValueError('Adicione um contato primeiro.')
-        self.service.connect(self.peer.get('host') or '',int(self.peer.get('port') or DEFAULT_PORT),self.peer['id_bytes'])
+        host = self.peer.get('host') or ''
+        port = int(self.peer.get('port') or DEFAULT_PORT)
+        self.service.connect(host, port, self.peer['id_bytes'])
     def poll(self):
         out=[]
         while True:
