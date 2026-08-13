@@ -28,7 +28,7 @@ Para perfis separados (identidades/estado isolados):
 .venv\Scripts\python.exe p2p_12.py --profile bob
 ```
 
-## Manual do Usuário (resumido)
+## Manual do Usuário
 
 1. Preparação
 
